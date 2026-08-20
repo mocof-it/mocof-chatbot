@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Matches the "engines" field in package.json — CI should catch a
+      # regression on the same Node version this actually deploys on
+      # (Vercel serverless functions run Node 20.x per vercel.json's
+      # implied runtime / package.json's "engines").
+      - name: Set up Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Syntax-check every JS file in the repo, not just the ones covered by
+      # tests — catches a stray typo in a file nothing currently imports
+      # (e.g. a knowledge/*.js module edited but never re-tested) before it
+      # ever reaches `vercel dev` or a deploy.
+      - name: Syntax-check all JS files (node --check)
+        run: |
+          set -e
+          find . \
+            -name "*.js" \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" \
+            -print0 \
+          | xargs -0 -n1 node --check
+          echo "All JS files parsed cleanly."
+
+      - name: Run test suite
+        run: npm test
+
+      # node --check above only parses syntax — it never resolves imports,
+      # and the test suite only imports the files it happens to test. A
+      # package used in api/*.js but missing from package.json (e.g. added
+      # in code but never `npm install`ed) can pass both of those cleanly
+      # and still crash at runtime the moment Vercel invokes the function.
+      # This step actually imports every serverless function entrypoint to
+      # catch exactly that class of bug before it reaches production.
+      - name: Verify serverless functions import cleanly
+        run: |
+          set -e
+          for f in api/*.js; do
+            echo "Importing $f..."
+            node -e "import('./$f').catch(e => { console.error(e.message); process.exit(1); })"
+          done
+          echo "All api/*.js modules imported cleanly."

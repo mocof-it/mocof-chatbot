@@ -1,0 +1,18 @@
+{
+  "name": "mocof-chatbot",
+  "version": "1.0.0",
+  "description": "MOCOF AI Chatbot powered by Gemini",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'No build step required'",
+    "test": "node --test",
+    "test:consistency": "node --test test/consistency.test.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "stripe": "^22.5.0"
+  }
+}

@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MOCOF Chat</title>
+<style>
+  *, *::before, *::after {
+    margin: 0; padding: 0; box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont,
+                 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  }
+
+  /* ══════════════════════════════════════
+     FLOATING LAUNCHER BUTTON
+  ══════════════════════════════════════ */
+  .launcher {
+    position: fixed;
+    bottom: 28px; right: 28px;
+    width: 58px; height: 58px;
+    border-radius: 50%;
+    background: #000000;
+    border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.30);
+    z-index: 99999;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    outline: none;
+  }
+  .launcher:hover {
+    transform: scale(1.09);
+    box-shadow: 0 6px 30px rgba(0,0,0,0.36);
+  }
+  .launcher:active { transform: scale(0.94); }
+
+  .l-icon {
+    position: absolute;
+    width: 25px; height: 25px;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+  }
+  .l-icon.show { opacity: 1; transform: scale(1) rotate(0deg); }
+  .l-icon.hide { opacity: 0; transform: scale(0.5) rotate(90deg); pointer-events: none; }
+
+  .unread {
+    position: absolute; top: 2px; right: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #000000; border: 2.5px solid transparent;
+    display: none;
+  }
+  .unread.show { display: block; }
+
+  /* ══════════════════════════════════════
+     CHAT POPUP WINDOW
+  ══════════════════════════════════════ */
+  .chat-popup {
+    position: fixed;
+    bottom: 96px; right: 28px;
+    width: 350px; height: 520px;
+    background: #fff;
+    border-radius: 18px;
+    box-shadow: 0 10px 50px rgba(0,0,0,0.20), 0 2px 12px rgba(0,0,0,0.10);
+    display: flex; flex-direction: column; overflow: hidden;
+    z-index: 99998;
+    opacity: 0;
+    transform: scale(0.88) translateY(16px);
+    pointer-events: none;
+    transition: opacity 0.22s ease,
+                transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform-origin: bottom right;
+  }
+  .chat-popup.open {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    pointer-events: all;
+  }
+
+  /* ── HEADER ── */
+  .header {
+    background: #000000; padding: 12px 14px;
+    display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  }
+  .hav {
+    width: 38px; height: 38px; border-radius: 50%; background: #ffffff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 700; color: #000000;
+    flex-shrink: 0; user-select: none;
+  }
+  .hinfo { flex: 1; min-width: 0; }
+  .hname { font-size: 14px; font-weight: 600; color: #fff; }
+  .hsub  { font-size: 10.5px; color: #999999; margin-top: 2px; }
+  .hright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .odot {
+    width: 8px; height: 8px; border-radius: 50%; background: #4CAF50;
+    box-shadow: 0 0 0 2px rgba(76,175,80,0.25);
+  }
+  .hclose {
+    background: rgba(255,255,255,0.12); border: none; border-radius: 6px;
+    width: 28px; height: 28px; display: flex; align-items: center;
+    justify-content: center; cursor: pointer; transition: background 0.15s;
+  }
+  .hclose:hover { background: rgba(255,255,255,0.22); }
+  .hclose svg { width: 13px; height: 13px; stroke: #fff; }
+
+  /* ── MESSAGES ── */
+  .msgs {
+    flex: 1; overflow-y: auto; overflow-x: hidden;
+    padding: 13px 11px 8px; background: #f5f5f5;
+    display: flex; flex-direction: column; gap: 10px;
+    scroll-behavior: smooth;
+  }
+  .msgs::-webkit-scrollbar { width: 3px; }
+  .msgs::-webkit-scrollbar-thumb { background: #cccccc; border-radius: 2px; }
+
+  .mrow {
+    display: flex; align-items: flex-end; gap: 7px;
+    animation: pop 0.22s ease forwards;
+  }
+  .mrow.user { flex-direction: row-reverse; }
+
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .mav {
+    width: 24px; height: 24px; border-radius: 50%; background: #ffffff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; color: #000000;
+    flex-shrink: 0; margin-bottom: 2px; user-select: none;
+  }
+
+  /* ✨ FIX: The column now controls the max-width, keeping it clean */
+  .mcol { 
+    display: flex; 
+    flex-direction: column; 
+    max-width: 80%; 
+    min-width: 0; /* lets content (e.g. a wide table) shrink/scroll instead of overflowing the row */
+  }
+  .mrow.user .mcol { 
+    align-items: flex-end; 
+  }
+
+  /* ✨ FIX: max-content forces "Hello" to stay on one line, max-width keeps paragraphs from breaking out */
+  .bubble {
+    width: max-content; 
+    max-width: 100%; 
+    padding: 9px 13px; 
+    font-size: 13px;
+    line-height: 1.57; 
+    white-space: pre-wrap;
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }
+  
+  .bubble.bot {
+    background: #f0f0f0; color: #000000;
+    border-radius: 3px 14px 14px 14px;
+    border: 0.5px solid #dddddd;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  }
+  .bubble-img-wrap { margin-top: 8px; }
+  .bubble-img { max-width: 100%; border-radius: 10px; display: block; }
+  .bubble.user {
+    background: #000000; color: #fff;
+    border-radius: 14px 3px 14px 14px;
+  }
+  .mtime { font-size: 10px; color: #999999; margin-top: 3px; padding: 0 3px; }
+
+  /* ── STRUCTURED BOT CONTENT (paragraphs / lists / tables) ──
+     fmt() below turns a constrained Markdown subset into these elements.
+     Nested block elements get white-space: normal so ordinary browser
+     text-flow/wrapping applies to them, instead of inheriting the
+     bubble's pre-wrap (which is meant for plain paragraph line breaks). */
+  .bubble.bot .mpara {
+    margin: 0 0 6px; white-space: normal;
+  }
+  .bubble.bot .mpara:last-child { margin-bottom: 0; }
+
+  .bubble.bot .mlist {
+    margin: 2px 0 6px 18px; padding: 0; white-space: normal;
+  }
+  .bubble.bot .mlist:last-child { margin-bottom: 0; }
+  .bubble.bot .mlist li { margin: 2px 0; }
+
+  /* Scrolls horizontally if a table is wider than the bubble, rather than
+     being silently clipped by .msgs's overflow-x: hidden. */
+  .bubble.bot .mtbl-wrap {
+    overflow-x: auto; max-width: 100%; margin: 4px 0 6px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .bubble.bot .mtbl-wrap:last-child { margin-bottom: 0; }
+  .bubble.bot table.mtbl {
+    border-collapse: collapse; min-width: 100%; width: max-content;
+    max-width: 100%; font-size: 12px; white-space: normal;
+  }
+  .bubble.bot table.mtbl th,
+  .bubble.bot table.mtbl td {
+    border: 1px solid #dddddd; padding: 4px 7px;
+    text-align: left; vertical-align: top;
+  }
+  .bubble.bot table.mtbl th {
+    background: #e6e6e6; font-weight: 600;
+  }
+  .bubble.bot table.mtbl tr:nth-child(even) td {
+    background: #fafafa;
+  }
+
+  /* Classic flexbox overflow fix: without this, a flex row item's default
+     min-width:auto stops it shrinking below its content's natural size,
+     which would push a wide table out past the popup instead of letting
+     the .mtbl-wrap scrollbar above handle it — see .mcol's min-width:0. */
+
+  /* ── TYPING ── */
+  .trow { display: flex; align-items: flex-end; gap: 7px; }
+  .tbbl {
+    background: #f0f0f0; border: 0.5px solid #dddddd;
+    border-radius: 3px 14px 14px 14px;
+    padding: 11px 14px; display: flex; gap: 5px; align-items: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  }
+  .tdot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #000000; opacity: 0.4;
+    animation: td 1.3s ease infinite;
+  }
+  .tdot:nth-child(2) { animation-delay: 0.18s; }
+  .tdot:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes td {
+    0%,60%,100% { transform: translateY(0);   opacity: 0.4; }
+    30%         { transform: translateY(-5px); opacity: 1;   }
+  }
+
+  /* ── QUICK ACTIONS ── */
+  .qbar {
+    background: #fff; border-top: 1px solid #dddddd;
+    padding: 7px 9px; display: flex; gap: 5px;
+    flex-wrap: wrap; flex-shrink: 0;
+  }
+  .qbtn {
+    font-size: 11px; padding: 5px 9px; border-radius: 20px;
+    border: 0.5px solid #000000; background: #f0f0f0; color: #000000;
+    cursor: pointer; white-space: nowrap; font-family: inherit;
+    line-height: 1.2; transition: background 0.15s, color 0.15s, transform 0.1s;
+  }
+  .qbtn:hover:not(:disabled) { background: #000000; color: #fff; border-color: #000000; }
+  .qbtn:active:not(:disabled) { transform: scale(0.96); }
+  .qbtn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* ── INPUT BAR ── */
+  .ibar {
+    background: #fff; border-top: 1px solid #dddddd;
+    padding: 9px 10px; display: flex; align-items: flex-end;
+    gap: 8px; flex-shrink: 0;
+  }
+  .minput {
+    flex: 1; background: #f5f5f5; border: 1px solid #dddddd;
+    border-radius: 20px; padding: 8px 14px; font-size: 13px;
+    font-family: inherit; color: #000000; outline: none;
+    resize: none; line-height: 1.45; max-height: 72px;
+    overflow-y: auto; transition: border-color 0.15s, background 0.15s;
+    scrollbar-width: none;
+  }
+  .minput::-webkit-scrollbar { display: none; }
+  .minput::placeholder { color: #999999; }
+  .minput:focus { border-color: #000000; background: #fff; }
+  .minput:disabled { opacity: 0.5; }
+
+  .sbtn {
+    width: 36px; height: 36px; border-radius: 50%; background: #000000;
+    border: none; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; flex-shrink: 0;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .sbtn:hover:not(:disabled) { background: #333333; }
+  .sbtn:active:not(:disabled) { transform: scale(0.91); }
+  .sbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .sbtn svg { width: 15px; height: 15px; fill: #ffffff; }
+
+  /* ── DEPOSIT CARD ── */
+  .deposit-card {
+    margin-top: 10px; padding: 12px; border-radius: 12px;
+    background: #ffffff; border: 1px solid #dddddd;
+  }
+  .deposit-line {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: #555555; margin-bottom: 8px;
+  }
+  .deposit-line strong { color: #000000; font-size: 13px; }
+  .deposit-btn {
+    width: 100%; background: #000000; color: #ffffff; border: none;
+    border-radius: 20px; padding: 10px 14px; font-size: 13px; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: background 0.15s, transform 0.1s;
+  }
+  .deposit-btn:hover:not(:disabled) { background: #333333; }
+  .deposit-btn:active:not(:disabled) { transform: scale(0.98); }
+  .deposit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .deposit-status { font-size: 11px; color: #999999; margin-top: 6px; text-align: center; }
+  .deposit-status.err { color: #b00020; }
+
+  /* ── MOBILE ── */
+  @media (max-width: 480px) {
+    .chat-popup { width: calc(100vw - 16px); height: calc(100vh - 110px); right: 8px; bottom: 86px; }
+    .launcher   { bottom: 20px; right: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<button class="launcher" id="launcher" onclick="toggleChat()" aria-label="Chat with MOCOF">
+  <span class="unread" id="badge"></span>
+  <svg class="l-icon show" id="ico-open" viewBox="0 0 24 24" fill="none">
+    <path d="M4 4h16a1 1 0 011 1v10a1 1 0 01-1 1H8l-4 4V5a1 1 0 011-1z"
+          stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <svg class="l-icon hide" id="ico-close" viewBox="0 0 24 24" fill="none">
+    <path d="M18 6L6 18M6 6l12 12" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+  </svg>
+</button>
+
+<div class="chat-popup" id="chatPopup" role="dialog" aria-label="MOCOF Chat">
+
+  <div class="header">
+    <div class="hav" aria-hidden="true">M</div>
+    <div class="hinfo">
+      <div class="hname">Moco</div>
+      <div class="hsub">MOCOF AI Consultant</div>
+    </div>
+    <div class="hright">
+      <div class="odot"></div>
+      <button class="hclose" onclick="toggleChat()" aria-label="Close chat">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M18 6L6 18M6 6l12 12" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="msgs" id="msgs" role="log" aria-live="polite"></div>
+
+  <div class="qbar">
+    <button class="qbtn" onclick="sendQ('Tell me about your wall bed products.')">🛏️ Wall Beds</button>
+    <button class="qbtn" onclick="sendQ('I am interested in a home renovation. Can you help me?')">🏠 Renovation</button>
+    <button class="qbtn" onclick="sendQ('Where are your showrooms and opening hours?')">📍 Showrooms</button>
+    <button class="qbtn" onclick="sendQ('What warranty do you offer on your products?')">🛡️ Warranty</button>
+  </div>
+
+  <div class="ibar">
+    <textarea class="minput" id="minput" placeholder="Type a message..."
+              rows="1" maxlength="600" aria-label="Chat input"></textarea>
+    <button class="sbtn" id="sbtn" onclick="doSend()" aria-label="Send">
+      <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+    </button>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+/* ── Config ──────────────────────────────────────────── */
+// API endpoints — automatically use the same domain
+var API_URL            = 'https://mocof-chatbot.vercel.app/api/chat';
+var CREATE_DEPOSIT_URL = 'https://mocof-chatbot.vercel.app/api/create-deposit';
+
+/* ── State ───────────────────────────────────────────── */
+var isOpen      = false;
+var isBusy      = false;
+var chatHistory = [];
+
+/* Deposit button state — each offered deposit stores the exact message +
+   history snapshot the server used to compute it, keyed by a counter. The
+   button click sends that same snapshot to /api/create-deposit, which
+   re-derives the estimate independently rather than trusting anything
+   stored here — this is just what lets the click "remember" which turn's
+   estimate it belongs to. */
+var depositContexts = {};
+var depositSeq      = 0;
+
+/* ── DOM ─────────────────────────────────────────────── */
+var popup   = document.getElementById('chatPopup');
+var msgs    = document.getElementById('msgs');
+var minput  = document.getElementById('minput');
+var sbtn    = document.getElementById('sbtn');
+var badge   = document.getElementById('badge');
+var icoOpen = document.getElementById('ico-open');
+var icoCls  = document.getElementById('ico-close');
+var qbtns   = document.querySelectorAll('.qbtn');
+
+/* ── Init ────────────────────────────────────────────── */
+window.addEventListener('load', function () {
+  welcome();
+  initInput();
+  notifyParent();
+});
+
+/* ── Toggle ──────────────────────────────────────────── */
+function toggleChat() {
+  isOpen = !isOpen;
+  popup.classList.toggle('open', isOpen);
+  icoOpen.setAttribute('class', 'l-icon ' + (isOpen ? 'hide' : 'show'));
+  icoCls.setAttribute('class', 'l-icon ' + (isOpen ? 'show' : 'hide'));
+  badge.classList.remove('show');
+  if (isOpen) setTimeout(function () { minput.focus(); }, 320);
+  notifyParent();
+}
+
+/* ── Cross-frame resize notification ────────────────────
+   Required when embedded via <iframe> on an external site (e.g. a Wix
+   "Custom Code" snippet). Without this, an embedder has no way to know
+   whether the small launcher button or the full popup is showing, so it
+   has to permanently reserve space for the LARGER state -- on mobile,
+   where the popup goes near-full-screen (see the @media block above),
+   that means the invisible iframe box ends up covering almost the entire
+   phone screen at all times, blocking every tap on the site underneath it,
+   not just in one corner. Posting the open/closed state lets an embedder
+   resize its iframe wrapper to match -- small when collapsed, matching
+   the popup's actual footprint when open. Safe no-op if not embedded or
+   if the parent isn't listening. */
+function notifyParent() {
+  if (window.parent === window) return; // not inside an iframe
+  window.parent.postMessage({ type: 'mocof-chat-state', open: isOpen }, '*');
+}
+
+/* ── Welcome ─────────────────────────────────────────── */
+function welcome() {
+  addBot(
+    'Hi there! 👋 I\'m Moco, your MOCOF virtual consultant.\n\n' +
+    'I can help you with:\n' +
+    '• Wall beds & sofa beds\n' +
+    '• Home renovation advice\n' +
+    '• Product recommendations\n' +
+    '• Showroom locations & hours\n\n' +
+    'What can I help you with today?'
+  );
+}
+
+/* ── Input setup ─────────────────────────────────────── */
+function initInput() {
+  minput.addEventListener('input', function () {
+    minput.style.height = 'auto';
+    minput.style.height = Math.min(minput.scrollHeight, 72) + 'px';
+  });
+  minput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
+}
+
+/* ── Send handlers ───────────────────────────────────── */
+function doSend() {
+  if (isBusy) return;
+  var txt = minput.value.trim();
+  if (!txt) return;
+  minput.value = '';
+  minput.style.height = 'auto';
+  minput.focus();
+  process(txt);
+}
+
+function sendQ(txt) {
+  if (isBusy) return;
+  if (!isOpen) toggleChat();
+  setTimeout(function () { process(txt); }, isOpen ? 0 : 360);
+}
+
+/* ── Core: sends to /api/chat ────────────────────────── */
+async function process(txt) {
+  addUser(txt);
+  setBusy(true);
+  showTyping();
+
+  chatHistory.push({ role: 'user', content: txt });
+  if (chatHistory.length > 40) chatHistory = chatHistory.slice(-40);
+
+  // Snapshot exactly what's being sent to /api/chat -- if a deposit offer
+  // comes back, this is the same (message, history) pair api/chat.js used
+  // to compute it, and what gets replayed to /api/create-deposit later.
+  var reqMessage = txt;
+  var reqHistory = chatHistory.slice();
+
+  try {
+    var res = await fetch(API_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ message: reqMessage, history: reqHistory })
+    });
+
+    if (!res.ok) console.error('HTTP error:', res.status, res.statusText);
+    var data = await res.json();
+
+    hideTyping();
+
+    if (data.success && data.message) {
+      addBot(data.message, data.images, data.deposit, reqMessage, reqHistory);
+      chatHistory.push({ role: 'assistant', content: data.message });
+    } else {
+      console.error('API error response:', JSON.stringify(data));
+      addBot('I’m sorry, something went wrong. Please try again or visit one of our showrooms!');
+    }
+
+  } catch (err) {
+    console.error('Chat error:', err);
+    hideTyping();
+    addBot('I’m sorry, I couldn’t connect. Please check your connection or visit us in person!');
+  }
+
+  setBusy(false);
+  minput.focus();
+  if (!isOpen) badge.classList.add('show');
+}
+
+/* ── Bubbles ─────────────────────────────────────────── */
+function addUser(txt) {
+  var row = document.createElement('div');
+  row.className = 'mrow user';
+  row.innerHTML =
+    '<div class="mcol">' +
+      '<div class="bubble user">' + esc(txt) + '</div>' +
+      '<div class="mtime">' + now() + '</div>' +
+    '</div>';
+  msgs.appendChild(row);
+  scrollDown();
+}
+
+function addBot(txt, images, deposit, reqMessage, reqHistory) {
+  var row = document.createElement('div');
+  row.className = 'mrow bot';
+  row.innerHTML =
+    '<div class="mav" aria-hidden="true">M</div>' +
+    '<div class="mcol">' +
+      '<div class="bubble bot">' + fmt(txt) + imagesHtml(images) + depositHtml(deposit, reqMessage, reqHistory) + '</div>' +
+      '<div class="mtime">Moco · ' + now() + '</div>' +
+    '</div>';
+  msgs.appendChild(row);
+  scrollDown();
+}
+
+function imagesHtml(images) {
+  if (!Array.isArray(images) || images.length === 0) return '';
+  return images.map(function (img) {
+    return '<div class="bubble-img-wrap"><img class="bubble-img" src="' +
+      esc(img.url) + '" alt="' + esc(img.label || '') + '" loading="lazy" ' +
+      'onerror="this.parentElement.style.display=\'none\'"></div>';
+  }).join('');
+}
+
+/* ── Deposit card ─────────────────────────────────────
+   Rendered only when the server itself decided a full grand total is being
+   shown this turn (data.deposit is non-null — see computeDepositOffer() in
+   api/chat.js). The AI never writes this button or a payment link itself;
+   it's a structured element the widget renders, the same pattern already
+   used for product photos via imagesHtml() above. */
+function fmtRM(n) {
+  return 'RM ' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function depositHtml(deposit, reqMessage, reqHistory) {
+  if (!deposit || typeof deposit.depositAmount !== 'number') return '';
+  var id = 'dep' + (++depositSeq);
+  depositContexts[id] = { message: reqMessage, history: reqHistory };
+  return (
+    '<div class="deposit-card">' +
+      '<div class="deposit-line"><span>Grand total</span><strong>' + esc(fmtRM(deposit.grandTotal)) + '</strong></div>' +
+      '<div class="deposit-line"><span>' + esc(String(deposit.depositPercent)) + '% deposit due now</span><strong>' + esc(fmtRM(deposit.depositAmount)) + '</strong></div>' +
+      '<button class="deposit-btn" id="' + id + '-btn" onclick="payDeposit(\'' + id + '\')">Pay ' + esc(String(deposit.depositPercent)) + '% Deposit — ' + esc(fmtRM(deposit.depositAmount)) + '</button>' +
+      '<div class="deposit-status" id="' + id + '-status"></div>' +
+    '</div>'
+  );
+}
+
+async function payDeposit(id) {
+  var ctx = depositContexts[id];
+  var btn = document.getElementById(id + '-btn');
+  var status = document.getElementById(id + '-status');
+  if (!ctx || !btn) return;
+
+  btn.disabled = true;
+  var originalLabel = btn.textContent;
+  btn.textContent = 'Starting checkout…';
+  if (status) { status.textContent = ''; status.classList.remove('err'); }
+
+  try {
+    var res = await fetch(CREATE_DEPOSIT_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ message: ctx.message, history: ctx.history })
+    });
+    var data = await res.json();
+
+    if (res.ok && data.success && data.url) {
+      // New tab, not a same-tab redirect — this is an embedded widget
+      // (often inside an iframe on the storefront), so navigating the
+      // widget itself away from the chat would strand the conversation.
+      window.open(data.url, '_blank', 'noopener');
+      btn.textContent = originalLabel;
+      btn.disabled = false;
+      if (status) status.textContent = 'Opened Stripe checkout in a new tab.';
+    } else {
+      throw new Error((data && data.error) || 'Could not start checkout');
+    }
+  } catch (err) {
+    console.error('Deposit checkout error:', err);
+    btn.textContent = originalLabel;
+    btn.disabled = false;
+    if (status) {
+      status.textContent = 'Something went wrong — please try again or contact us on WhatsApp.';
+      status.classList.add('err');
+    }
+  }
+}
+
+/* ── Typing indicator ────────────────────────────────── */
+function showTyping() {
+  if (document.getElementById('tr')) return;
+  var row = document.createElement('div');
+  row.className = 'trow'; row.id = 'tr';
+  row.innerHTML =
+    '<div class="mav" aria-hidden="true">M</div>' +
+    '<div class="tbbl">' +
+      '<div class="tdot"></div><div class="tdot"></div><div class="tdot"></div>' +
+    '</div>';
+  msgs.appendChild(row);
+  scrollDown();
+}
+function hideTyping() { var r = document.getElementById('tr'); if (r) r.remove(); }
+
+/* ── Helpers ─────────────────────────────────────────── */
+function setBusy(v) {
+  isBusy = v; sbtn.disabled = v; minput.disabled = v;
+  qbtns.forEach(function (b) { b.disabled = v; });
+}
+function scrollDown() {
+  setTimeout(function () { msgs.scrollTop = msgs.scrollHeight; }, 55);
+}
+function now() {
+  var d = new Date(), h = d.getHours(), m = d.getMinutes();
+  var a = h >= 12 ? 'PM' : 'AM';
+  return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + ' ' + a;
+}
+function esc(t) {
+  return t
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\n/g,'<br>');
+}
+
+/* Render a constrained Markdown subset: bold, numbered lists, bullet
+   lists, and pipe tables. Text is escaped line-by-line via esc() before
+   any tag is added, so the only HTML that can appear is the structural
+   markup this function builds itself -- never raw text from the model. */
+function fmt(raw) {
+  var lines = String(raw).replace(/\r\n/g, '\n').split('\n');
+  var out = '';
+  var i = 0;
+
+  var TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/;
+  var NUM_ITEM  = /^\s*(\d{1,3})[.)]\s+(.*)$/;
+  var BUL_ITEM  = /^\s*[-•]\s+(.*)$/;
+
+  function inline(s) {
+    return esc(s)
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+      .replace(/\*/g, '');
+  }
+
+  // Sometimes the model writes a whole numbered list on ONE physical line
+  // ("1. Foo? 2. Bar? 3. Baz?") instead of using real line breaks, which
+  // would otherwise all collapse into a single list item. This looks for
+  // further "N. "/"N) " markers embedded inside an already-captured item's
+  // text and splits there too -- but ONLY when the number is EXACTLY the
+  // next one expected in sequence (2 after 1, 3 after 2, ...), so it can't
+  // misfire on things like a decimal price ("RM 23,698.11") or any other
+  // incidental digit-period-space pattern that isn't really a list marker.
+  function splitEmbeddedNumbering(text, nextExpected) {
+    var re = /\s(\d{1,3})[.)]\s+/g;
+    var cuts = [];
+    var want = nextExpected;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      if (parseInt(m[1], 10) !== want) break;
+      cuts.push({ index: m.index, len: m[0].length });
+      want++;
+    }
+    if (cuts.length === 0) return { parts: [text.trim()], nextExpected: nextExpected };
+    var parts = [];
+    var pos = 0;
+    for (var k = 0; k < cuts.length; k++) {
+      parts.push(text.slice(pos, cuts[k].index).trim());
+      pos = cuts[k].index + cuts[k].len;
+    }
+    parts.push(text.slice(pos).trim());
+    return { parts: parts, nextExpected: want };
+  }
+
+  function splitRow(line) {
+    var t = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return t.split('|').map(function (c) { return c.trim(); });
+  }
+
+  function isTableStart(idx) {
+    return lines[idx].indexOf('|') !== -1 &&
+      idx + 1 < lines.length && TABLE_SEP.test(lines[idx + 1]);
+  }
+
+  while (i < lines.length) {
+    if (lines[i].trim() === '') { i++; continue; }
+
+    // ── Table block ──
+    if (isTableStart(i)) {
+      var header = splitRow(lines[i]);
+      i += 2; // skip header + separator row
+      var rows = [];
+      while (i < lines.length && lines[i].trim() !== '' && lines[i].indexOf('|') !== -1) {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      out += '<div class="mtbl-wrap"><table class="mtbl"><thead><tr>' +
+        header.map(function (c) { return '<th>' + inline(c) + '</th>'; }).join('') +
+        '</tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr>' + r.map(function (c) { return '<td>' + inline(c) + '</td>'; }).join('') + '</tr>';
+        }).join('') +
+        '</tbody></table></div>';
+      continue;
+    }
+
+    // ── Numbered list block ──
+    if (NUM_ITEM.test(lines[i])) {
+      var oitems = [];
+      var expected = null;
+      while (i < lines.length && NUM_ITEM.test(lines[i])) {
+        var nm = lines[i].match(NUM_ITEM);
+        if (expected === null) expected = parseInt(nm[1], 10);
+        var split = splitEmbeddedNumbering(nm[2], expected + 1);
+        for (var p = 0; p < split.parts.length; p++) {
+          if (split.parts[p]) oitems.push('<li>' + inline(split.parts[p]) + '</li>');
+        }
+        expected = split.nextExpected;
+        i++;
+      }
+      out += '<ol class="mlist">' + oitems.join('') + '</ol>';
+      continue;
+    }
+
+    // ── Bullet list block ──
+    if (BUL_ITEM.test(lines[i])) {
+      var uitems = [];
+      while (i < lines.length && BUL_ITEM.test(lines[i])) {
+        uitems.push('<li>' + inline(lines[i].match(BUL_ITEM)[1]) + '</li>');
+        i++;
+      }
+      out += '<ul class="mlist">' + uitems.join('') + '</ul>';
+      continue;
+    }
+
+    // ── Plain paragraph: consecutive plain lines joined with <br> ──
+    var para = [];
+    while (i < lines.length && lines[i].trim() !== '' && !isTableStart(i) &&
+           !NUM_ITEM.test(lines[i]) && !BUL_ITEM.test(lines[i])) {
+      para.push(inline(lines[i]));
+      i++;
+    }
+    out += '<p class="mpara">' + para.join('<br>') + '</p>';
+  }
+
+  return out;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin",  "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "POST, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type" }
+      ]
+    },
+    {
+      "source": "/public/(.*)",
+      "headers": [
+        { "key": "X-Frame-Options", "value": "ALLOWALL" },
+        { "key": "Content-Security-Policy", "value": "frame-ancestors *" }
+      ]
+    }
+  ],
+  "rewrites": [
+    { "source": "/",                "destination": "/public/index.html" },
+    { "source": "/widget",          "destination": "/public/index.html" },
+    { "source": "/deposit-success", "destination": "/public/deposit-success.html" }
+  ]
+}
