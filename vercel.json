@@ -10,7 +10,7 @@
       ]
     },
     {
-      "source": "/public/(.*)",
+      "source": "/(.*)",
       "headers": [
         { "key": "X-Frame-Options", "value": "ALLOWALL" },
         { "key": "Content-Security-Policy", "value": "frame-ancestors *" }
@@ -18,8 +18,7 @@
     }
   ],
   "rewrites": [
-    { "source": "/",                "destination": "/public/index.html" },
-    { "source": "/widget",          "destination": "/public/index.html" },
-    { "source": "/deposit-success", "destination": "/public/deposit-success.html" }
+    { "source": "/widget",          "destination": "/index.html" },
+    { "source": "/deposit-success", "destination": "/deposit-success.html" }
   ]
 }
