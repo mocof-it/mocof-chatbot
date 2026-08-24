@@ -5,10 +5,14 @@
 // Endpoint: POST /api/stripe-webhook — set this as the endpoint URL in the
 // Stripe Dashboard (Developers → Webhooks). Never called by the widget.
 // Env vars: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
-// Optional: EMAIL_API_KEY, COMPANY_NOTIFY_EMAIL — see notifyCompany() below
+// Optional: EMAIL_API_KEY, COMPANY_NOTIFY_EMAIL, EMAIL_FROM_ADDRESS — see notifyCompany() below
+// Optional: GOOGLE_SHEETS_SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL,
+//           GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY, GOOGLE_SHEETS_TAB_NAME
+//           — see lib/sheetsLogger.js
 // =============================================================
 
 import Stripe from 'stripe';
+import { logDepositToSheet } from '../lib/sheetsLogger.js';
 
 // Vercel parses the request body as JSON by default. Stripe's signature
 // check needs the EXACT raw bytes the client sent — re-serializing a parsed
@@ -139,11 +143,14 @@ export default async function handler(req, res) {
             stripeSessionId: session.id
         };
 
-        await notifyCompany(details);
-
-        // Phase 4 of the main roadmap (lead logging) can hook in here once
-        // it's rebuilt — the Google Sheets integration was removed from
-        // main on Aug 20, so there's nothing to log to yet.
+        // Run independently — a failure in one (e.g. Sheets misconfigured)
+        // must never block or delay the other. Both already swallow their
+        // own errors internally, so Promise.all here is just for concurrency,
+        // not error handling.
+        await Promise.all([
+            notifyCompany(details),
+            logDepositToSheet(details)
+        ]);
     }
 
     // Acknowledge receipt for any event type Stripe sends, even ones this
