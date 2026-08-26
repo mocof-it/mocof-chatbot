@@ -149,9 +149,9 @@ ${getRelevantKnowledge(message, history)}
 PRODUCT RECOMMENDATION RULES:
 - Study room → Gioco Single with Desk (RM 17,538.11 sale)
 - Living room → Murano Queen with Sofa (RM 23,698.11 sale)
-- Low ceiling below 2.4m (~7ft) → Gioco Series is the ONLY option
-- Standard ceiling 2.4m and above (~7ft+) → Murano Series
-- Murano REQUIRES a 2.4m+ / ~7ft+ ceiling — this is not just a suggestion, Murano is not installable below that. If a customer states or implies a ceiling under ~7ft/2.4m, do NOT recommend or confirm any Murano model — recommend the equivalent Gioco model instead and say plainly why.
+- Low ceiling below 2.4m (~7.9ft) → Gioco Series is the ONLY option
+- Standard ceiling 2.4m and above (~7.9ft+) → Murano Series
+- Murano REQUIRES a 2.4m+ / ~7.9ft+ ceiling — this is not just a suggestion, Murano is not installable below that. If a customer states or implies a ceiling under 2.4m/~7.9ft, do NOT recommend or confirm any Murano model — recommend the equivalent Gioco model instead and say plainly why. Note this is NOT the same as the separate 7ft minimum for surround cabinetry below — a ceiling can be tall enough for cabinetry yet still too short for a Murano.
 - Always ask ceiling height AND room purpose before recommending wall beds
 - If the integrated Sofa variant is out of budget, recommend the BUDGET WALL BED + SEPARATE SOFA COMBO from the knowledge base (a plain wall bed plus a standalone Basic Sofa) instead of inventing a discount — this is a real, cheaper, two-product combo
 ${buildMuranoCeilingWarningBlock(message, history)}
@@ -577,16 +577,26 @@ function extractCabinetryDimensions(history, message) {
     return { heightFt, totalWidthFt };
 }
 
-// Minimum ceiling a Murano model can be installed under, reusing the exact
-// same constant as the cabinetry side-cabinet build height (both are the
-// "~7ft / 2.4m" threshold knowledge/wallbeds.js already describes in prose)
-// so this can never drift from the cabinetry formula's own number.
-// NOTE: 2.4m is actually ≈7.87ft, not 7ft exactly — 7ft is what the business
-// asked to enforce in code, so a ceiling between 7ft and 7.87ft currently
-// still passes this check even though it's technically under the knowledge
-// text's stated 2.4m cutoff. Worth confirming with MOCOF whether the exact
-// 7.87ft/2.4m figure should be enforced instead.
-const MURANO_MIN_CEILING_FT = SIDE_CABINET_MAX_HEIGHT_FT;
+// Minimum ceiling a Murano model can be installed under. 2.4m is the real
+// business requirement (confirmed with MOCOF) and is what knowledge/wallbeds.js
+// states in prose throughout — so 2.4m is the figure of record here, and feet
+// is the derived unit, not the other way round.
+//
+// This is deliberately NOT the same constant as SIDE_CABINET_MAX_HEIGHT_FT
+// (7ft). The two were previously aliased, which quietly under-enforced this
+// rule: a ceiling between 7ft and 2.4m passed as installable even though it's
+// below the stated cutoff. They are unrelated measurements that happened to be
+// near each other — 7ft is how tall a side cabinet is physically built, 2.4m is
+// how much headroom a Murano needs — so they must be free to move independently.
+const MURANO_MIN_CEILING_M = 2.4;
+
+// round2 (hoisted, defined further down) is applied for the SAME reason
+// convertToFeet() applies it: a customer who answers "2.4m" has that value
+// converted to feet through convertToFeet, which rounds to 2dp — yielding
+// 7.87. Comparing that against an unrounded 7.874015...ft threshold would
+// flag a ceiling of exactly the stated minimum as too low. Rounding both
+// sides identically keeps "2.4m" a passing answer, which it must be.
+const MURANO_MIN_CEILING_FT = round2(MURANO_MIN_CEILING_M * FT_PER_M); // 7.87
 
 // Reuses the SAME extraction the cabinetry flow already runs (wall/ceiling
 // height + selected model) — this is not a new extraction path, it just
@@ -930,10 +940,12 @@ export default async function handler(req, res) {
             lastError = err;
         }
 
-        // Backstop for the CRITICAL — IMAGES system-prompt rule: strips any sentence
-        // that still claims an inability to show/display/send a photo, in case the
-        // model slips one through despite the instruction (same "verify in code,
-        // don't just trust the prompt" principle as findHallucinatedPrices above).
+        // Post-processing chain for a successful reply, in order: price
+        // guardrail (with one regeneration before giving up), then the
+        // image-disclaimer strip, then image/deposit attachment. Every step
+        // here is the "verify in code, don't just trust the prompt" backstop
+        // for a rule the system prompt already states — the prompt asks, this
+        // enforces.
         if (reply) {
             const cabinetryAllowedAmounts = computeCabinetryAllowedAmounts(message, history);
             const badPrices = findHallucinatedPrices(reply, message, cabinetryAllowedAmounts);

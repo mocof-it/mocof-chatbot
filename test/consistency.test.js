@@ -49,6 +49,9 @@ import { getWarrantyKnowledge } from '../knowledge/warranty.js';
 import { getRenovationKnowledge } from '../knowledge/renovation.js';
 import { getBasicFurnitureKnowledge } from '../knowledge/basicfurniture.js';
 import { PRODUCT_IMAGES, getRelevantImages } from '../knowledge/productImages.js';
+import { logDepositToSheet, base64url, normalizePrivateKey, getAccessToken } from '../lib/sheetsLogger.js';
+
+import { generateKeyPairSync, createVerify } from 'node:crypto';
 
 function round2(n) {
     return Math.round(n * 100) / 100;
@@ -594,10 +597,43 @@ describe('detectMuranoCeilingConflict — wall-bed series ceiling restriction', 
         assert.match(conflict.conflictingLabel, /Murano/);
     });
 
-    test('Murano + a ceiling at or above 7ft is NOT a conflict', () => {
-        const history = [{ role: 'assistant', content: "I'd recommend the Murano Queen." }];
-        assert.equal(detectMuranoCeilingConflict('7ft', history), null);
+    // NOTE: the history below must end with the assistant ASKING about height,
+    // or extractCabinetryDimensions' bare-number inference has nothing to
+    // attribute "7.87ft" to and silently yields no height — which makes a
+    // detectMuranoCeilingConflict(...) === null assertion pass for the wrong
+    // reason. Every case in this describe block needs that priming turn.
+    test('Murano + a ceiling at or above the 2.4m minimum is NOT a conflict', () => {
+        const history = [
+            { role: 'assistant', content: "I'd recommend the Murano Queen for your living room." },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        assert.equal(detectMuranoCeilingConflict('7.87ft', history), null);
         assert.equal(detectMuranoCeilingConflict('11ft', history), null);
+    });
+
+    // The gap this closes: 7ft used to pass because MURANO_MIN_CEILING_FT was
+    // aliased to SIDE_CABINET_MAX_HEIGHT_FT. 2.4m is ≈7.87ft, so a 7ft–7.87ft
+    // ceiling is genuinely too short for a Murano and must now be flagged.
+    test('a ceiling between 7ft and 2.4m is a conflict (this range previously passed)', () => {
+        const history = [
+            { role: 'assistant', content: "I'd recommend the Murano Queen for your living room." },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        for (const height of ['7ft', '7.5ft', '7.8ft']) {
+            const conflict = detectMuranoCeilingConflict(height, history);
+            assert.ok(conflict, `expected ${height} to be flagged as below the 2.4m Murano minimum`);
+            assert.match(conflict.conflictingLabel, /Murano/);
+        }
+    });
+
+    // Boundary case that only breaks if the threshold and convertToFeet round
+    // differently: a customer answering with the exact stated minimum in the
+    // unit the business quotes it in must not be told their ceiling is too low.
+    test('a customer answering exactly "2.4m" is not flagged', () => {
+        const history = [{ role: 'assistant', content: 'Murano Queen it is. What is the height of the wall?' }];
+        assert.equal(convertToFeet(2.4, 'm'), MURANO_MIN_CEILING_FT);
+        assert.equal(detectMuranoCeilingConflict('2.4m', history), null);
+        assert.equal(detectMuranoCeilingConflict('240cm', history), null);
     });
 
     test('Gioco + a ceiling under 7ft is NOT a conflict (Gioco is rated for low ceilings)', () => {
@@ -624,8 +660,30 @@ describe('detectMuranoCeilingConflict — wall-bed series ceiling restriction', 
         assert.match(block, /Gioco/);
     });
 
-    test('MURANO_MIN_CEILING_FT is the same constant as the cabinetry side-cabinet height, by construction', () => {
-        assert.equal(MURANO_MIN_CEILING_FT, SIDE_CABINET_MAX_HEIGHT_FT);
+    test('MURANO_MIN_CEILING_FT is derived from the 2.4m business requirement, not from the cabinetry height', () => {
+        assert.equal(MURANO_MIN_CEILING_FT, convertToFeet(2.4, 'm'));
+        assert.notEqual(
+            MURANO_MIN_CEILING_FT,
+            SIDE_CABINET_MAX_HEIGHT_FT,
+            'these are unrelated measurements (Murano headroom vs. side-cabinet build height) and must not be re-aliased — doing so under-enforces the 2.4m minimum'
+        );
+    });
+
+    // The two thresholds are close enough to be confused for each other, so
+    // pin the case that distinguishes them: 7.5ft fits cabinetry but not a Murano.
+    test('the cabinetry minimum (7ft) and the Murano minimum (2.4m) gate independently', () => {
+        const history = [
+            { role: 'user', content: 'I want a Murano Queen with side cabinets around it, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '7.5ft' },
+            { role: 'assistant', content: 'And the total width of the wall?' }
+        ];
+        const est = getCabinetryEstimateFromContext('12ft', history);
+        assert.ok(est && !est.blocked, 'a 7.5ft wall is tall enough for cabinetry (>= 7ft)');
+        assert.ok(
+            detectMuranoCeilingConflict('12ft', history),
+            'the same 7.5ft wall is still too short for a Murano (< 2.4m)'
+        );
     });
 });
 
@@ -667,4 +725,278 @@ describe('knowledge module content sanity', () => {
             assert.ok(!/undefined|\[object Object\]|NaN/.test(text), `${name} knowledge text contains a stray runtime artifact`);
         });
     }
+});
+
+// ── lib/sheetsLogger.js — deposit logging ───────────────────────
+// This module is the one place in the project that hand-rolls a security
+// primitive (an RS256 JWT signed with node:crypto instead of googleapis), so
+// the JWT assembly is verified against a real generated key pair rather than
+// trusted by inspection. Everything here runs offline: global fetch is stubbed,
+// so no test ever reaches Google.
+describe('lib/sheetsLogger.js — deposit logging', () => {
+
+    // Every test that touches process.env or globalThis.fetch restores both,
+    // otherwise leaked Sheets config would silently change the behavior of the
+    // no-op tests below depending on execution order.
+    const SHEETS_ENV_KEYS = [
+        'GOOGLE_SHEETS_SPREADSHEET_ID',
+        'GOOGLE_SERVICE_ACCOUNT_EMAIL',
+        'GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY',
+        'GOOGLE_SHEETS_TAB_NAME'
+    ];
+
+    async function withEnv(overrides, fn) {
+        const saved = {};
+        for (const k of SHEETS_ENV_KEYS) saved[k] = process.env[k];
+        const savedFetch = globalThis.fetch;
+        try {
+            for (const k of SHEETS_ENV_KEYS) delete process.env[k];
+            for (const [k, v] of Object.entries(overrides)) process.env[k] = v;
+            return await fn();
+        } finally {
+            for (const k of SHEETS_ENV_KEYS) {
+                if (saved[k] === undefined) delete process.env[k];
+                else process.env[k] = saved[k];
+            }
+            globalThis.fetch = savedFetch;
+        }
+    }
+
+    // A real key pair — createSign() genuinely signs with this, so the
+    // signature assertions below are meaningful rather than shape-only.
+    const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding:  { type: 'spki',  format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    });
+
+    const CONFIGURED = {
+        GOOGLE_SHEETS_SPREADSHEET_ID: 'sheet-abc-123',
+        GOOGLE_SERVICE_ACCOUNT_EMAIL: 'svc@mocof.iam.gserviceaccount.com',
+        GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: privateKey
+    };
+
+    // Routes the two calls logDepositToSheet makes (token exchange, then the
+    // Sheets append) and records both so they can be asserted on.
+    function stubFetch({ tokenOk = true, appendOk = true } = {}) {
+        const calls = [];
+        globalThis.fetch = async (url, options) => {
+            calls.push({ url: String(url), options });
+            if (String(url).includes('oauth2.googleapis.com')) {
+                return tokenOk
+                    ? { ok: true,  json: async () => ({ access_token: 'test-token-xyz' }) }
+                    : { ok: false, status: 401, text: async () => 'invalid_grant' };
+            }
+            return appendOk
+                ? { ok: true,  json: async () => ({}) }
+                : { ok: false, status: 403, text: async () => 'caller lacks permission' };
+        };
+        return calls;
+    }
+
+    const DETAILS = {
+        quoteRef: 'MQS-20260826-ABC234',
+        wallBedModel: 'Murano Queen Sofa',
+        grandTotal: '31234.56',
+        depositPercent: '10',
+        depositAmountPaid: '3123.46',
+        customerEmail: 'customer@example.com',
+        stripeSessionId: 'cs_test_123'
+    };
+
+    function sheetsCall(calls) {
+        const call = calls.find(c => c.url.includes('sheets.googleapis.com'));
+        assert.ok(call, 'expected a Sheets append request');
+        return call;
+    }
+
+    // ── base64url ──
+    test('base64url produces URL-safe output with no +, / or = characters', () => {
+        // Bytes chosen so the standard base64 encoding actually contains the
+        // characters being replaced — otherwise this would pass vacuously.
+        const bytes = Buffer.from([0xff, 0xfe, 0xfd, 0xfc, 0x00]);
+        assert.match(bytes.toString('base64'), /[+/=]/, 'test input must exercise the replacements');
+        assert.doesNotMatch(base64url(bytes), /[+/=]/);
+    });
+
+    test('base64url output decodes back to the original value', () => {
+        const original = JSON.stringify({ alg: 'RS256', typ: 'JWT' });
+        assert.equal(Buffer.from(base64url(original), 'base64url').toString('utf8'), original);
+    });
+
+    // ── normalizePrivateKey ──
+    // Vercel's env var UI stores multi-line values with literal backslash-n,
+    // which createSign() rejects outright — the most likely cause of Sheets
+    // logging working locally but failing in production.
+    test('normalizePrivateKey restores real newlines from literal \\n escapes', () => {
+        const escaped = '-----BEGIN PRIVATE KEY-----\\nMIIabc\\n-----END PRIVATE KEY-----\\n';
+        const normalized = normalizePrivateKey(escaped);
+        assert.doesNotMatch(normalized, /\\n/, 'no literal backslash-n should survive');
+        assert.equal(normalized.split('\n').length, 4);
+    });
+
+    test('normalizePrivateKey leaves an already-correct PEM untouched', () => {
+        assert.equal(normalizePrivateKey(privateKey), privateKey);
+    });
+
+    test('a key mangled by Vercel-style escaping still round-trips to the original PEM', () => {
+        const escaped = privateKey.replace(/\n/g, '\\n');
+        assert.notEqual(escaped, privateKey, 'the escaped form must actually differ');
+        assert.equal(normalizePrivateKey(escaped), privateKey);
+    });
+
+    // ── getAccessToken / JWT assembly ──
+    test('getAccessToken sends a correctly signed RS256 JWT and returns the token', async () => {
+        await withEnv(CONFIGURED, async () => {
+            const calls = stubFetch();
+            const token = await getAccessToken(CONFIGURED.GOOGLE_SERVICE_ACCOUNT_EMAIL, privateKey);
+            assert.equal(token, 'test-token-xyz');
+            assert.equal(calls.length, 1);
+
+            const assertion = new URLSearchParams(calls[0].options.body).get('assertion');
+            const [h, c, sig] = assertion.split('.');
+            assert.ok(h && c && sig, 'assertion must be a three-part JWT');
+
+            assert.deepEqual(
+                JSON.parse(Buffer.from(h, 'base64url').toString('utf8')),
+                { alg: 'RS256', typ: 'JWT' }
+            );
+
+            const claims = JSON.parse(Buffer.from(c, 'base64url').toString('utf8'));
+            assert.equal(claims.iss, CONFIGURED.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+            assert.equal(claims.aud, 'https://oauth2.googleapis.com/token');
+            assert.equal(claims.scope, 'https://www.googleapis.com/auth/spreadsheets');
+            assert.equal(claims.exp - claims.iat, 3600, 'Google rejects a JWT valid for longer than an hour');
+
+            // The signature must verify against the matching public key — this
+            // is what proves the hand-rolled signing is actually correct, not
+            // merely well-shaped.
+            const verifier = createVerify('RSA-SHA256');
+            verifier.update(h + '.' + c);
+            verifier.end();
+            assert.ok(
+                verifier.verify(publicKey, Buffer.from(sig, 'base64url')),
+                'JWT signature failed to verify against its own key pair'
+            );
+        });
+    });
+
+    test('getAccessToken throws when Google rejects the token exchange', async () => {
+        await withEnv(CONFIGURED, async () => {
+            stubFetch({ tokenOk: false });
+            await assert.rejects(
+                () => getAccessToken(CONFIGURED.GOOGLE_SERVICE_ACCOUNT_EMAIL, privateKey),
+                /token exchange failed: 401/
+            );
+        });
+    });
+
+    // ── logDepositToSheet: the graceful-no-op contract ──
+    test('does nothing and makes no network call when Sheets config is absent', async () => {
+        await withEnv({}, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet(DETAILS);
+            assert.equal(calls.length, 0, 'must not attempt any request when unconfigured');
+        });
+    });
+
+    test('a partially-configured environment is still treated as unconfigured', async () => {
+        // All three vars are required; one alone must not trigger a doomed call.
+        await withEnv({ GOOGLE_SHEETS_SPREADSHEET_ID: 'sheet-abc-123' }, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet(DETAILS);
+            assert.equal(calls.length, 0);
+        });
+    });
+
+    // stripe-webhook.js awaits this inside Promise.all — any throw here becomes
+    // a 500 and makes Stripe retry an event that was already processed.
+    test('never throws, whatever fails downstream', async () => {
+        await withEnv(CONFIGURED, async () => {
+            stubFetch({ tokenOk: false });
+            await assert.doesNotReject(() => logDepositToSheet(DETAILS));
+        });
+        await withEnv(CONFIGURED, async () => {
+            stubFetch({ appendOk: false });
+            await assert.doesNotReject(() => logDepositToSheet(DETAILS));
+        });
+        await withEnv(CONFIGURED, async () => {
+            globalThis.fetch = async () => { throw new Error('socket hang up'); };
+            await assert.doesNotReject(() => logDepositToSheet(DETAILS));
+        });
+        await withEnv({ ...CONFIGURED, GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: 'not-a-pem' }, async () => {
+            stubFetch();
+            await assert.doesNotReject(() => logDepositToSheet(DETAILS));
+        });
+    });
+
+    // ── logDepositToSheet: the appended row ──
+    test('appends the eight deposit fields in the documented column order', async () => {
+        await withEnv(CONFIGURED, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet(DETAILS);
+
+            const append = sheetsCall(calls);
+            assert.equal(append.options.headers.Authorization, 'Bearer test-token-xyz');
+
+            const [row] = JSON.parse(append.options.body).values;
+            assert.equal(row.length, 8);
+            assert.ok(!isNaN(Date.parse(row[0])), 'column A must be an ISO timestamp');
+            assert.deepEqual(row.slice(1), [
+                DETAILS.quoteRef,
+                DETAILS.wallBedModel,
+                DETAILS.grandTotal,
+                DETAILS.depositPercent,
+                DETAILS.depositAmountPaid,
+                DETAILS.customerEmail,
+                DETAILS.stripeSessionId
+            ]);
+        });
+    });
+
+    // Drift guard, in the spirit of the rest of this file: the row is written
+    // into a fixed A:H range. Adding a ninth field without widening the range
+    // would silently drop it.
+    test('the row width matches the A:H range it is written into', async () => {
+        await withEnv(CONFIGURED, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet(DETAILS);
+
+            const append = sheetsCall(calls);
+            const range = decodeURIComponent(append.url.match(/values\/(.+?):append/)[1]);
+            const [, firstCol, lastCol] = range.match(/!([A-Z]+):([A-Z]+)$/);
+            const width = lastCol.charCodeAt(0) - firstCol.charCodeAt(0) + 1;
+
+            const [row] = JSON.parse(append.options.body).values;
+            assert.equal(width, row.length, 'range ' + range + ' holds ' + width + ' columns but the row has ' + row.length);
+        });
+    });
+
+    test('missing optional detail fields become empty strings, never the string "undefined"', async () => {
+        await withEnv(CONFIGURED, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet({ stripeSessionId: 'cs_test_only' });
+
+            const [row] = JSON.parse(sheetsCall(calls).options.body).values;
+            assert.equal(row.length, 8);
+            assert.deepEqual(row.slice(1, 7), ['', '', '', '', '', '']);
+            assert.equal(row[7], 'cs_test_only');
+        });
+    });
+
+    test('GOOGLE_SHEETS_TAB_NAME overrides the default "Deposits" tab', async () => {
+        await withEnv(CONFIGURED, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet(DETAILS);
+            assert.match(decodeURIComponent(sheetsCall(calls).url), /Deposits!A:H/);
+        });
+
+        await withEnv({ ...CONFIGURED, GOOGLE_SHEETS_TAB_NAME: 'Live Deposits' }, async () => {
+            const calls = stubFetch();
+            await logDepositToSheet(DETAILS);
+            const url = sheetsCall(calls).url;
+            assert.match(decodeURIComponent(url), /Live Deposits!A:H/);
+            assert.doesNotMatch(url, /Live Deposits/, 'a tab name with a space must be URL-encoded in the request');
+        });
+    });
 });
