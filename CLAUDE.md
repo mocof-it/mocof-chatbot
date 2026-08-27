@@ -72,6 +72,19 @@ Several structured tables exist specifically so prose and code can't disagree:
 
 `lib/sheetsLogger.js` hand-signs a service-account JWT with `node:crypto` rather than adding `googleapis`. Both it and the Resend call use raw `fetch` with no SDK — `stripe` is the project's only runtime dependency, and it's worth keeping it that way. It has its own test-only export block (`base64url`, `normalizePrivateKey`, `getAccessToken`) for the same reason `api/chat.js` does; its tests stub `globalThis.fetch` and generate a throwaway RSA key pair, so they need no credentials and make no network calls. `normalizePrivateKey()` exists because Vercel's env var UI stores multi-line values with literal `\n` escapes that `createSign()` rejects — the usual cause of Sheets logging working locally but failing in production.
 
+### Google service-account credentials
+
+The Cloud project, service account, and Sheets API enablement backing `lib/sheetsLogger.js` live under **`mocof.chatbot@gmail.com`** — a Google account owned by MOCOF as a business, not by any individual developer.
+
+Two reasons, both load-bearing:
+
+- **Org policy.** Google Cloud organizations (including most Workspace domains created in recent years) enforce `iam.disableServiceAccountKeyCreation` by default, which blocks the downloadable JSON key this integration authenticates with. Working around it needs org-level permissions a project developer generally won't have. A standalone account with no Workspace/Cloud org attached isn't subject to the policy at all — that's the mechanism this relies on.
+- **Continuity.** Credentials held in a developer's personal account make that person a single point of failure and an access problem the day they leave, which for an intern or contractor is a certainty rather than a risk. Business ownership means the key can be rotated or handed over without them.
+
+The destination Sheet does **not** need to live under this account — it's shared with the service account's email like any external collaborator, so it can stay in MOCOF's real Drive/Workspace. Only the service account itself has to sit under the dedicated account.
+
+Full reasoning, setup steps, and the Workspace-centralization alternative are in [GOOGLE_SHEETS_CREDENTIALS.md](GOOGLE_SHEETS_CREDENTIALS.md) — don't duplicate them here.
+
 ### Widget
 
 `public/index.html` is a single self-contained file (no build, no framework, ES5-style `var`/`function`). Two things to know:
