@@ -64,13 +64,44 @@ Several structured tables exist specifically so prose and code can't disagree:
 
 ### Deposit flow
 
-`computeDepositOffer()` mirrors `buildCabinetryEstimateBlock()`'s gating *exactly* (same `hasCabinetryPriceIntent()` check, same "must be a non-blocked full `grandTotal`" requirement) — the button must never appear ahead of or instead of the price text. Keep these two in lockstep when changing either.
+`getDepositBasisFromContext()` is the **single** definition of whether a deposit is payable and on what amount. Both the chat response's offer (`computeDepositOffer()`) and the actual Stripe charge (`api/create-deposit.js`) call it and nothing else — that's what stops the quoted and charged amounts from diverging. It returns `null` or `{ type, wallBedModelLabel, total, heightFt, totalWidthFt }`.
 
-`api/create-deposit.js` imports `getCabinetryEstimateFromContext` and `DEPOSIT_PERCENT` **from `api/chat.js`** (one serverless entrypoint importing another) and re-derives the total from the replayed conversation. The client sends only `{ message, history }` — never an amount. The model is barred from writing payment links at all; the widget renders the button from the structured `deposit` field.
+Two paths, in priority order:
+
+1. **`wallbed_with_cabinetry`** — the combined grand total. Gating mirrors `buildCabinetryEstimateBlock()` exactly (same price-intent check, same non-blocked-full-`grandTotal` requirement), so the button can't appear ahead of or instead of the price text. Keep those two in lockstep.
+2. **`wallbed_only`** — the model's sale price alone. Gated on `hasCabinetryIntent()` being **false**, not merely on the cabinetry estimate being absent: mid-cabinetry-flow the estimate is legitimately missing while measurements are collected, and falling through there would offer payment for less than the quote being assembled.
+
+`hasCabinetryIntent()` is deliberately **broader** than the cabinetry routing regex in `KNOWLEDGE_MODULES`, and deliberately does not reuse it. That regex is narrow so a generic "cabinet" can't claim a knowledge slot, and it misses ordinary phrasings like "a Murano Queen with cabinets". Here the error costs invert — over-matching only costs an unoffered deposit, under-matching offers the wrong payment — so the two patterns stay separate.
+
+Both paths refuse a deposit when `detectMuranoCeilingConflict()` fires: never take money for a bed that can't be installed at the stated ceiling. Note the cabinetry flow only blocks walls under the 7ft *side-cabinet* minimum, which is a different and lower threshold than Murano's 2.4m.
+
+The `type` on the returned basis drives three things: the widget's deposit-card label, the Stripe line-item name (a wall-bed-only deposit must not say "+ Cabinetry"), and the Sheet's Cabinets column via `depositIncludesCabinets()`.
+
+`api/create-deposit.js` imports `getDepositBasisFromContext` and `DEPOSIT_PERCENT` **from `api/chat.js`** (one serverless entrypoint importing another) and re-derives the total from the replayed conversation. The client sends only `{ message, history }` — never an amount. The model is barred from writing payment links at all; the widget renders the button from the structured `deposit` field.
 
 `api/stripe-webhook.js` sets `export const config = { api: { bodyParser: false } }` — Stripe's signature check needs the exact raw bytes, and re-serializing parsed JSON breaks it. It handles `checkout.session.completed` (not the success redirect, which a customer can skip by closing the tab), and returns 200 for every event type so Stripe doesn't retry ones we intentionally ignore. `notifyCompany()` (Resend) and `logDepositToSheet()` both swallow their own errors — a notification failure must never turn into a 500 and cause Stripe to retry an already-processed event.
 
 `lib/sheetsLogger.js` hand-signs a service-account JWT with `node:crypto` rather than adding `googleapis`. Both it and the Resend call use raw `fetch` with no SDK — `stripe` is the project's only runtime dependency, and it's worth keeping it that way. It has its own test-only export block (`base64url`, `normalizePrivateKey`, `getAccessToken`) for the same reason `api/chat.js` does; its tests stub `globalThis.fetch` and generate a throwaway RSA key pair, so they need no credentials and make no network calls. `normalizePrivateKey()` exists because Vercel's env var UI stores multi-line values with literal `\n` escapes that `createSign()` rejects — the usual cause of Sheets logging working locally but failing in production.
+
+### The Sheet row shape
+
+`logDepositToSheet()` appends one row per confirmed deposit into a fixed range. Column order is a **stored data format** — rows already in the Sheet are written this way, so add new columns at the *end* and widen the range to match. The Sheets API silently truncates a row longer than its range rather than erroring, so a mismatch loses data quietly.
+
+| A | B | C | D | E | F | G | H | I | J | K |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Timestamp | Quote Ref | Wall Bed Model | Grand Total | Deposit % | Deposit Paid | Customer Email | Customer Name | Customer Phone | Stripe Session ID | Cabinets |
+
+Range: `<tab>!A:K`. The same table (with per-column value notes) is in [GOOGLE_SHEETS_CREDENTIALS.md](GOOGLE_SHEETS_CREDENTIALS.md), since that's what you follow when creating the sheet's header row — keep both in sync.
+
+**Columns G–I come from Stripe, not the widget.** `api/create-deposit.js` sets `phone_number_collection: { enabled: true }` and `billing_address_collection: 'required'` on the Checkout Session; the webhook reads them back off `session.customer_details`. Stripe has no standalone "collect name" switch — `customer_details.name` is filled from the billing-details form, which is why address collection is required rather than relying on the card form's cardholder-name field. That field doesn't exist for FPX, a payment method this session accepts, so the name would silently be blank for those customers otherwise. Any of G–I can still be blank if Stripe captured nothing.
+
+**Cabinets** is `Yes` / `No` — whether the deposit covers a wall bed with surround cabinetry or the bed alone.
+
+That value is derived, never tracked separately: `depositIncludesCabinets()` in `api/chat.js` maps the deposit type to Yes/No, `api/create-deposit.js` writes it into Stripe session metadata as `cabinets`, and the webhook reads it back. An **unrecognised type returns `''`** on purpose — a future third deposit type must not be silently recorded as "No", since a confident wrong answer in a business record is worse than a blank cell that visibly needs attention. The mapping lives in `chat.js` rather than `create-deposit.js` so it's testable without the `stripe` dependency.
+
+Sessions created before the `cabinets` field existed log an empty cell rather than being guessed at. `test/consistency.test.js` pins the column order, the row width against the range, and the Yes/No mapping.
+
+Adding a column: append at the **end** and widen the range in the same edit. The contact fields (H, I) were inserted mid-row instead, which moved Stripe Session ID from H to J — any row written before that change is misaligned from column H onward. That was acceptable only because the integration hadn't logged anything yet; assume it isn't next time.
 
 ### Google service-account credentials
 

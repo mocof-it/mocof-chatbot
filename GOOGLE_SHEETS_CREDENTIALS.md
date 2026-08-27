@@ -93,6 +93,43 @@ you're setting up a similar Google API integration elsewhere.
    URL, between `/d/` and `/edit`) → `GOOGLE_SHEETS_SPREADSHEET_ID`. These
    are set in Vercel → Project Settings → Environment Variables.
 
+## The Sheet's columns
+
+`logDepositToSheet()` appends one row per confirmed deposit into the range
+`<tab>!A:K`. Use this as the header row when creating or updating the sheet —
+the columns must be in exactly this order:
+
+| Col | Header | Value |
+|---|---|---|
+| A | Timestamp | ISO 8601, set when the row is written |
+| B | Quote Ref | `MQS-YYYYMMDD-XXXXXX` |
+| C | Wall Bed Model | e.g. `Murano Queen Sofa` |
+| D | Grand Total | Full quoted amount, RM |
+| E | Deposit % | Currently always `10` |
+| F | Deposit Paid | Amount actually charged, RM |
+| G | Customer Email | From Stripe Checkout |
+| H | Customer Name | From Stripe Checkout |
+| I | Customer Phone | From Stripe Checkout |
+| J | Stripe Session ID | `cs_...` |
+| K | Cabinets | `Yes` / `No` |
+
+Columns G–I are collected by Stripe's hosted checkout page, not by the chat
+widget — the widget never asks for contact details. Any of them can be blank
+if Stripe didn't capture one.
+
+**This is a stored data format.** Two rules when changing it:
+
+- The write range in `lib/sheetsLogger.js` must be exactly as wide as the row
+  array. A row longer than its range is silently **truncated** by the Sheets
+  API rather than rejected, so a mismatch loses data with no error anywhere.
+- Prefer appending new columns at the end. Inserting one shifts every column
+  after it, and rows already written keep the old layout — they'd need
+  rearranging by hand.
+
+The same table is in [CLAUDE.md](CLAUDE.md) alongside the rest of the
+architecture notes, and `test/consistency.test.js` pins the order, the row
+width against the range, and the Yes/No mapping. Update all three together.
+
 ## If MOCOF has an IT-managed Workspace and wants this centralized there instead
 
 Have whoever administers that Workspace grant a **project-level exception**

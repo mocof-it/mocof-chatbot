@@ -33,6 +33,12 @@ import {
     BASIC_FURNITURE_COMPANION_KEYS,
     MURANO_MIN_CEILING_FT,
     computeDepositOffer,
+    getDepositBasisFromContext,
+    hasCabinetryIntent,
+    hasPriceIntent,
+    DEPOSIT_TYPE_WITH_CABINETRY,
+    DEPOSIT_TYPE_WALLBED_ONLY,
+    depositIncludesCabinets,
     DEPOSIT_PERCENT
 } from '../api/chat.js';
 
@@ -801,7 +807,10 @@ describe('lib/sheetsLogger.js — deposit logging', () => {
         depositPercent: '10',
         depositAmountPaid: '3123.46',
         customerEmail: 'customer@example.com',
-        stripeSessionId: 'cs_test_123'
+        customerName: 'Aisyah Binti Rahman',
+        customerPhone: '+60123456789',
+        stripeSessionId: 'cs_test_123',
+        cabinets: 'Yes'
     };
 
     function sheetsCall(calls) {
@@ -931,7 +940,7 @@ describe('lib/sheetsLogger.js — deposit logging', () => {
     });
 
     // ── logDepositToSheet: the appended row ──
-    test('appends the eight deposit fields in the documented column order', async () => {
+    test('appends the eleven deposit fields in the documented column order', async () => {
         await withEnv(CONFIGURED, async () => {
             const calls = stubFetch();
             await logDepositToSheet(DETAILS);
@@ -940,8 +949,10 @@ describe('lib/sheetsLogger.js — deposit logging', () => {
             assert.equal(append.options.headers.Authorization, 'Bearer test-token-xyz');
 
             const [row] = JSON.parse(append.options.body).values;
-            assert.equal(row.length, 8);
+            assert.equal(row.length, 11);
             assert.ok(!isNaN(Date.parse(row[0])), 'column A must be an ISO timestamp');
+            // The three contact fields sit together (G, H, I) — Stripe Session
+            // ID and Cabinets follow them, NOT the other way round.
             assert.deepEqual(row.slice(1), [
                 DETAILS.quoteRef,
                 DETAILS.wallBedModel,
@@ -949,15 +960,20 @@ describe('lib/sheetsLogger.js — deposit logging', () => {
                 DETAILS.depositPercent,
                 DETAILS.depositAmountPaid,
                 DETAILS.customerEmail,
-                DETAILS.stripeSessionId
+                DETAILS.customerName,
+                DETAILS.customerPhone,
+                DETAILS.stripeSessionId,
+                DETAILS.cabinets
             ]);
         });
     });
 
     // Drift guard, in the spirit of the rest of this file: the row is written
-    // into a fixed A:H range. Adding a ninth field without widening the range
-    // would silently drop it.
-    test('the row width matches the A:H range it is written into', async () => {
+    // into a fixed range. Adding a field without widening that range would let
+    // the Sheets API silently truncate it. Deliberately derives the expected
+    // width from the range itself rather than hardcoding a number, so it keeps
+    // working as columns are added.
+    test('the row width matches the range it is written into', async () => {
         await withEnv(CONFIGURED, async () => {
             const calls = stubFetch();
             await logDepositToSheet(DETAILS);
@@ -978,9 +994,11 @@ describe('lib/sheetsLogger.js — deposit logging', () => {
             await logDepositToSheet({ stripeSessionId: 'cs_test_only' });
 
             const [row] = JSON.parse(sheetsCall(calls).options.body).values;
-            assert.equal(row.length, 8);
-            assert.deepEqual(row.slice(1, 7), ['', '', '', '', '', '']);
-            assert.equal(row[7], 'cs_test_only');
+            assert.equal(row.length, 11);
+            assert.deepEqual(row.slice(1, 9), ['', '', '', '', '', '', '', ''],
+                'every unset field, contact details included, must be an empty string');
+            assert.equal(row[9], 'cs_test_only');
+            assert.equal(row[10], '', 'a session with no cabinets metadata logs an empty cell, not "undefined"');
         });
     });
 
@@ -988,15 +1006,300 @@ describe('lib/sheetsLogger.js — deposit logging', () => {
         await withEnv(CONFIGURED, async () => {
             const calls = stubFetch();
             await logDepositToSheet(DETAILS);
-            assert.match(decodeURIComponent(sheetsCall(calls).url), /Deposits!A:H/);
+            assert.match(decodeURIComponent(sheetsCall(calls).url), /Deposits!A:K/);
         });
 
         await withEnv({ ...CONFIGURED, GOOGLE_SHEETS_TAB_NAME: 'Live Deposits' }, async () => {
             const calls = stubFetch();
             await logDepositToSheet(DETAILS);
             const url = sheetsCall(calls).url;
-            assert.match(decodeURIComponent(url), /Live Deposits!A:H/);
+            assert.match(decodeURIComponent(url), /Live Deposits!A:K/);
             assert.doesNotMatch(url, /Live Deposits/, 'a tab name with a space must be URL-encoded in the request');
         });
+    });
+});
+
+
+// ── Wall-bed-only deposits ──────────────────────────────────────
+// A second deposit path: a customer who never raised cabinetry can pay a
+// deposit on the wall bed's sale price alone. The gating below is the
+// payment-critical part — see getDepositBasisFromContext() in api/chat.js.
+describe('wall-bed-only deposit path', () => {
+
+    const WALLBED_ONLY = [
+        { role: 'user', content: 'Do you have a Murano Queen?' },
+        { role: 'assistant', content: 'Yes — the Murano Queen is one of our vertical wall beds.' }
+    ];
+
+    test('offers a deposit on the wall bed sale price when cabinetry never came up', () => {
+        const basis = getDepositBasisFromContext('How much is it?', WALLBED_ONLY);
+        assert.ok(basis, 'expected a deposit basis');
+        assert.equal(basis.type, DEPOSIT_TYPE_WALLBED_ONLY);
+        assert.equal(basis.wallBedModelLabel, 'Murano Queen');
+
+        // Must be the model's own sale price from WALLBED_MODEL_PRICING —
+        // never a figure invented here or carried over from a cabinetry quote.
+        const priced = WALLBED_MODEL_PRICING.find(m => m.label === 'Murano Queen');
+        assert.equal(basis.total, priced.sale);
+
+        // No wall is being surveyed, so there are no measurements to record.
+        assert.equal(basis.heightFt, null);
+        assert.equal(basis.totalWidthFt, null);
+    });
+
+    test('computeDepositOffer surfaces the type and a 10% amount', () => {
+        const offer = computeDepositOffer('How much is it?', WALLBED_ONLY);
+        assert.ok(offer);
+        assert.equal(offer.depositType, DEPOSIT_TYPE_WALLBED_ONLY);
+        assert.equal(offer.depositPercent, DEPOSIT_PERCENT);
+        assert.equal(offer.depositAmount, round2(offer.grandTotal * DEPOSIT_PERCENT / 100));
+    });
+
+    test('still requires an explicit price question', () => {
+        assert.equal(hasPriceIntent('Do you have a Murano Queen?', WALLBED_ONLY), false);
+        assert.equal(getDepositBasisFromContext('Do you have a Murano Queen?', WALLBED_ONLY), null);
+    });
+
+    test('returns null when no specific model has been established', () => {
+        const vague = [{ role: 'user', content: 'Tell me about your wall beds.' }];
+        assert.equal(getDepositBasisFromContext('How much are they?', vague), null);
+    });
+
+    // The core safety property of this path. Mid-cabinetry-flow the combined
+    // estimate is legitimately unavailable while measurements are collected —
+    // falling through to a cheaper wall-bed-only deposit there would offer a
+    // payment for less than the quote being assembled.
+    test('is suppressed the moment cabinetry is mentioned, even before any measurement', () => {
+        const history = [
+            { role: 'user', content: 'I want a Murano Queen with cabinets, how much in total?' },
+            { role: 'assistant', content: 'Sure! What is the total height of the wall, in feet?' }
+        ];
+        assert.equal(hasCabinetryIntent('11ft', history), true);
+        assert.equal(getDepositBasisFromContext('11ft', history), null);
+        assert.equal(computeDepositOffer('11ft', history), null);
+    });
+
+    test('is suppressed when the ASSISTANT is the one who raised cabinetry', () => {
+        const history = [
+            { role: 'user', content: 'I like the Murano Queen.' },
+            { role: 'assistant', content: 'We can also build surround cabinetry around it. How much storage do you need?' }
+        ];
+        assert.equal(hasCabinetryIntent('What would that cost?', history), true);
+        assert.equal(getDepositBasisFromContext('What would that cost?', history), null);
+    });
+
+    // Phrasings the cabinetry ROUTING regex in KNOWLEDGE_MODULES deliberately
+    // does not match — it is narrow so a generic "cabinet" can't claim a
+    // knowledge slot. This gate must be broader, because here a miss offers the
+    // wrong payment rather than merely loading the wrong knowledge module.
+    test('catches cabinetry phrasings the narrower routing regex misses', () => {
+        const routing = KNOWLEDGE_MODULES.find(m => m.key === 'cabinetry').test;
+        for (const phrase of [
+            'i want a murano queen with cabinets, how much in total?',
+            'can i add cabinets around it',
+            'what about some cabinetry too'
+        ]) {
+            assert.equal(routing.test(phrase), false, 'fixture must be one the routing regex misses: ' + phrase);
+            assert.equal(hasCabinetryIntent(phrase, []), true, 'deposit gate must still catch: ' + phrase);
+        }
+    });
+
+    test('a completed cabinetry estimate still takes precedence and reports the combined type', () => {
+        const history = [
+            { role: 'user', content: 'I want a Murano Queen Sofa with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        const basis = getDepositBasisFromContext('10ft', history);
+        assert.ok(basis);
+        assert.equal(basis.type, DEPOSIT_TYPE_WITH_CABINETRY);
+
+        // Strictly more than the bed alone — the combined total, not a fallback.
+        const bed = WALLBED_MODEL_PRICING.find(m => m.label === 'Murano Queen Sofa');
+        assert.ok(basis.total > bed.sale, 'combined total must exceed the wall bed price alone');
+    });
+
+    // Regression: taking money for a bed that cannot be installed. Applies to
+    // BOTH paths — the cabinetry flow only ever blocked walls under the 7ft
+    // side-cabinet minimum, so a 7ft-2.4m ceiling with a Murano previously
+    // produced a priced estimate and an offered deposit regardless.
+    test('never offers a deposit on a Murano below the 2.4m ceiling minimum', () => {
+        const wallbedOnly = [
+            { role: 'assistant', content: "The Murano Queen would suit that room." },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        assert.ok(detectMuranoCeilingConflict('7.5ft', wallbedOnly), 'fixture must be a real ceiling conflict');
+        assert.equal(getDepositBasisFromContext('7.5ft, how much?', wallbedOnly), null);
+
+        const withCabinetry = [
+            { role: 'user', content: 'Murano Queen with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '7.5ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        // The cabinetry estimate itself still computes (7.5ft clears the 7ft
+        // cabinetry minimum) — it is the deposit that must be withheld.
+        const est = getCabinetryEstimateFromContext('12ft', withCabinetry);
+        assert.ok(est && !est.blocked, 'cabinetry is still buildable at 7.5ft');
+        assert.equal(getDepositBasisFromContext('12ft', withCabinetry), null);
+        assert.equal(computeDepositOffer('12ft', withCabinetry), null);
+    });
+
+    test('a Gioco at the same low ceiling is unaffected', () => {
+        const history = [
+            { role: 'assistant', content: 'The Gioco Single suits a low ceiling.' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        const basis = getDepositBasisFromContext('7.5ft, how much is it?', history);
+        assert.ok(basis, 'Gioco is rated for low ceilings and must still be depositable');
+        assert.equal(basis.type, DEPOSIT_TYPE_WALLBED_ONLY);
+    });
+
+    // Both deposit type values reach Stripe metadata and then the Sheet, so
+    // they are a stored format: changing one silently orphans every row
+    // already logged under the old value.
+    test('deposit type identifiers are the exact strings written to the Sheet', () => {
+        assert.equal(DEPOSIT_TYPE_WITH_CABINETRY, 'wallbed_with_cabinetry');
+        assert.equal(DEPOSIT_TYPE_WALLBED_ONLY, 'wallbed_only');
+    });
+});
+
+
+// Runs logDepositToSheet() against a stubbed fetch and returns the row it tried
+// to append. Shares the same offline approach as the sheetsLogger suite above.
+async function captureSheetRow(details) {
+    const saved = {
+        id: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
+    };
+    const savedFetch = globalThis.fetch;
+    const { privateKey } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding:  { type: 'spki',  format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    });
+    try {
+        process.env.GOOGLE_SHEETS_SPREADSHEET_ID = 'sheet-x';
+        process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL = 'svc@x.iam.gserviceaccount.com';
+        process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY = privateKey;
+
+        let row = null;
+        globalThis.fetch = async (url, options) => {
+            if (String(url).includes('oauth2.googleapis.com')) {
+                return { ok: true, json: async () => ({ access_token: 't' }) };
+            }
+            row = JSON.parse(options.body).values[0];
+            return { ok: true, json: async () => ({}) };
+        };
+        await logDepositToSheet(details);
+        return row;
+    } finally {
+        if (saved.id === undefined) delete process.env.GOOGLE_SHEETS_SPREADSHEET_ID; else process.env.GOOGLE_SHEETS_SPREADSHEET_ID = saved.id;
+        if (saved.email === undefined) delete process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL; else process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL = saved.email;
+        if (saved.key === undefined) delete process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY; else process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY = saved.key;
+        globalThis.fetch = savedFetch;
+    }
+}
+
+
+// ── The Sheet's Cabinets column ─────────────────────────────────
+// Yes/No is what MOCOF reads in the spreadsheet; it is derived from the
+// deposit type rather than tracked separately so the two cannot disagree.
+describe('deposit "Cabinets" Yes/No mapping', () => {
+    test('maps each deposit type to the value written into the Sheet', () => {
+        assert.equal(depositIncludesCabinets(DEPOSIT_TYPE_WITH_CABINETRY), 'Yes');
+        assert.equal(depositIncludesCabinets(DEPOSIT_TYPE_WALLBED_ONLY), 'No');
+    });
+
+    // A future third deposit type must not be silently recorded as "No" — a
+    // confident wrong answer in a business record is worse than a blank cell
+    // that visibly needs attention.
+    test('an unrecognised or missing type yields a blank cell, never a wrong "No"', () => {
+        assert.equal(depositIncludesCabinets('kitchen_only'), '');
+        assert.equal(depositIncludesCabinets(undefined), '');
+        assert.equal(depositIncludesCabinets(null), '');
+        assert.equal(depositIncludesCabinets(''), '');
+    });
+
+    // Ties the mapping to what the deposit flow actually produces, so adding a
+    // deposit type without extending the mapping fails here rather than in a
+    // spreadsheet weeks later.
+    test('every deposit type the flow can produce has a Yes/No, not a blank', () => {
+        const wallbedOnly = getDepositBasisFromContext('How much is it?', [
+            { role: 'user', content: 'Do you have a Murano Queen?' },
+            { role: 'assistant', content: 'Yes — the Murano Queen is available.' }
+        ]);
+        const withCabinetry = getDepositBasisFromContext('10ft', [
+            { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ]);
+
+        for (const basis of [wallbedOnly, withCabinetry]) {
+            assert.ok(basis, 'fixture should produce a deposit basis');
+            const flag = depositIncludesCabinets(basis.type);
+            assert.ok(flag === 'Yes' || flag === 'No', 'unmapped deposit type: ' + basis.type);
+        }
+
+        assert.equal(depositIncludesCabinets(wallbedOnly.type), 'No');
+        assert.equal(depositIncludesCabinets(withCabinetry.type), 'Yes');
+    });
+
+    test('the value reaches the Sheet row in the Cabinets column', async () => {
+        // Guards the wiring, not just the mapping: create-deposit.js puts this
+        // in Stripe metadata, the webhook reads it back, sheetsLogger writes it
+        // to column I.
+        const written = await captureSheetRow({ stripeSessionId: 'cs_x', cabinets: 'No' });
+        assert.equal(written.length, 11);
+        assert.equal(written[10], 'No');
+    });
+});
+
+
+// ── Customer contact fields ─────────────────────────────────────
+// Name, email and phone all come from Stripe's hosted checkout via
+// session.customer_details (see api/create-deposit.js's
+// phone_number_collection / billing_address_collection) — the chat widget
+// never asks for them. These pin the Sheet side of that.
+describe('customer contact columns (name / email / phone)', () => {
+
+    test('the three contact fields are adjacent, in G/H/I order', async () => {
+        const row = await captureSheetRow({
+            customerEmail: 'buyer@example.com',
+            customerName: 'Aisyah Binti Rahman',
+            customerPhone: '+60123456789',
+            stripeSessionId: 'cs_contact',
+            cabinets: 'Yes'
+        });
+        assert.equal(row.length, 11);
+        assert.deepEqual(row.slice(6, 9), ['buyer@example.com', 'Aisyah Binti Rahman', '+60123456789']);
+
+        // Everything after the contact block must have shifted with it.
+        assert.equal(row[9], 'cs_contact');
+        assert.equal(row[10], 'Yes');
+    });
+
+    // Stripe may return no name or phone at all (older sessions, or a method
+    // that captured neither). A blank cell is correct; the literal string
+    // "undefined" reaching a business record is not.
+    test('a session with no name or phone logs blanks, not "undefined"', async () => {
+        const row = await captureSheetRow({
+            customerEmail: 'buyer@example.com',
+            stripeSessionId: 'cs_no_contact'
+        });
+        assert.equal(row[7], '');
+        assert.equal(row[8], '');
+        assert.ok(!row.some(cell => String(cell).includes('undefined')), 'no cell may contain "undefined"');
+    });
+
+    // A phone number must survive verbatim — Malaysian numbers begin with a
+    // leading + that a naive numeric coercion would strip.
+    test('a phone number is written verbatim, keeping its leading +', async () => {
+        const row = await captureSheetRow({ customerPhone: '+60123456789', stripeSessionId: 'cs_p' });
+        assert.equal(row[8], '+60123456789');
+        assert.equal(typeof row[8], 'string');
     });
 });

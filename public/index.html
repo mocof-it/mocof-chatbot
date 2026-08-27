@@ -383,6 +383,16 @@ var chatHistory = [];
 var depositContexts = {};
 var depositSeq      = 0;
 
+/* Checkouts started from this tab but not yet confirmed paid. Populated in
+   payDeposit(), drained by the deposit-success message handler below so the
+   confirmation bubble can quote the real quote ref and amounts — those never
+   round-trip through Stripe, they only exist here in the tab that started it. */
+var pendingDeposits = [];
+
+/* Session ids already confirmed, so a refresh of the success tab (or a
+   duplicate post) can't append the same confirmation bubble twice. */
+var confirmedDepositSessions = {};
+
 /* ── DOM ─────────────────────────────────────────────── */
 var popup   = document.getElementById('chatPopup');
 var msgs    = document.getElementById('msgs');
@@ -560,13 +570,23 @@ function fmtRM(n) {
   return 'RM ' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/* The customer needs to see WHAT the total covers before paying against it —
+   a wall-bed-only deposit and a wall-bed-plus-cabinetry deposit otherwise look
+   identical in this card. depositType comes from computeDepositOffer() in
+   api/chat.js; anything unrecognised falls back to the neutral wording. */
+function depositScopeLabel(deposit) {
+  if (deposit.depositType === 'wallbed_only') return 'Wall bed total';
+  if (deposit.depositType === 'wallbed_with_cabinetry') return 'Wall bed + cabinetry total';
+  return 'Grand total';
+}
+
 function depositHtml(deposit, reqMessage, reqHistory) {
   if (!deposit || typeof deposit.depositAmount !== 'number') return '';
   var id = 'dep' + (++depositSeq);
   depositContexts[id] = { message: reqMessage, history: reqHistory };
   return (
     '<div class="deposit-card">' +
-      '<div class="deposit-line"><span>Grand total</span><strong>' + esc(fmtRM(deposit.grandTotal)) + '</strong></div>' +
+      '<div class="deposit-line"><span>' + esc(depositScopeLabel(deposit)) + '</span><strong>' + esc(fmtRM(deposit.grandTotal)) + '</strong></div>' +
       '<div class="deposit-line"><span>' + esc(String(deposit.depositPercent)) + '% deposit due now</span><strong>' + esc(fmtRM(deposit.depositAmount)) + '</strong></div>' +
       '<button class="deposit-btn" id="' + id + '-btn" onclick="payDeposit(\'' + id + '\')">Pay ' + esc(String(deposit.depositPercent)) + '% Deposit — ' + esc(fmtRM(deposit.depositAmount)) + '</button>' +
       '<div class="deposit-status" id="' + id + '-status"></div>' +
@@ -594,10 +614,29 @@ async function payDeposit(id) {
     var data = await res.json();
 
     if (res.ok && data.success && data.url) {
+      // Remember what this checkout was for, so the "Deposit Received" bubble
+      // can state real figures when deposit-success.html reports back. The
+      // Stripe session id is recovered from the checkout URL purely to match
+      // the right pending deposit if several were ever started.
+      pendingDeposits.push({
+        depositId:     id,
+        sessionId:     extractStripeSessionId(data.url),
+        quoteRef:      data.quoteRef,
+        depositAmount: data.depositAmount,
+        grandTotal:    data.grandTotal
+      });
+
       // New tab, not a same-tab redirect — this is an embedded widget
       // (often inside an iframe on the storefront), so navigating the
       // widget itself away from the chat would strand the conversation.
-      window.open(data.url, '_blank', 'noopener');
+      //
+      // NOTE: 'noopener' was deliberately REMOVED here. It nulls window.opener
+      // in the new tab, which is exactly the channel deposit-success.html uses
+      // to report a completed payment back into this conversation. The tradeoff
+      // is that the opened tab can reach window.opener — that tab is Stripe
+      // Checkout and then our own success page, both trusted, and being
+      // cross-origin it can do nothing to this document beyond navigating it.
+      window.open(data.url, '_blank');
       btn.textContent = originalLabel;
       btn.disabled = false;
       if (status) status.textContent = 'Opened Stripe checkout in a new tab.';
@@ -614,6 +653,85 @@ async function payDeposit(id) {
     }
   }
 }
+
+/* ── Deposit confirmation, reported back from the Stripe success tab ──
+   public/deposit-success.html posts to this window (its window.opener) once
+   the customer lands on it after paying. That page is served from this same
+   origin, so the origin check below is a strict equality — anything else is
+   ignored outright.
+
+   This is a display-only convenience. The deposit is already confirmed
+   server-side by api/stripe-webhook.js before that page ever loads, so
+   nothing here completes, verifies, or records a payment; if the message
+   never arrives (opener severed, tab closed, popup blocked) the success page
+   itself still shows the customer a full confirmation on its own. */
+function extractStripeSessionId(checkoutUrl) {
+  var m = String(checkoutUrl || '').match(/cs_[A-Za-z0-9_]+/);
+  return m ? m[0] : null;
+}
+
+/* Prefers an exact session-id match, falling back to the most recent pending
+   checkout — in practice there is only ever one, but matching keeps the
+   figures correct if a customer somehow starts two. */
+function takePendingDeposit(sessionId) {
+  var idx = -1;
+  if (sessionId) {
+    for (var i = pendingDeposits.length - 1; i >= 0; i--) {
+      if (pendingDeposits[i].sessionId === sessionId) { idx = i; break; }
+    }
+  }
+  if (idx === -1) idx = pendingDeposits.length - 1;
+  if (idx < 0) return null;
+  return pendingDeposits.splice(idx, 1)[0];
+}
+
+function addDepositConfirmation(sessionId) {
+  var info = takePendingDeposit(sessionId);
+
+  var lines = ['**Deposit Received**', ''];
+  lines.push('Thank you — your reservation deposit has been confirmed.');
+
+  if (info) {
+    lines.push('');
+    if (info.quoteRef) lines.push('- Quote ref: ' + info.quoteRef);
+    if (typeof info.depositAmount === 'number') lines.push('- Deposit paid: ' + fmtRM(info.depositAmount));
+    if (typeof info.grandTotal === 'number') lines.push('- Estimate total: ' + fmtRM(info.grandTotal));
+  }
+
+  lines.push('');
+  lines.push('This goes toward your final invoice, confirmed after the site survey. Our team will be in touch on **WhatsApp** shortly to arrange it.');
+
+  // Rendered through the normal bot-bubble path so it looks like any other
+  // reply from Moco. Deliberately NOT pushed into chatHistory: the deposit
+  // amount is a percentage of the estimate and is not among the figures
+  // computeCabinetryAllowedAmounts() allows, so replaying it to the model
+  // invites it to echo a number the price guardrail would then flag as
+  // hallucinated — costing a regeneration or a fallback reply. The existing
+  // deposit card is kept out of history for the same reason.
+  addBot(lines.join('\n'));
+
+  // Retire the button this payment came from so it can't be clicked again.
+  if (info && info.depositId) {
+    var btn = document.getElementById(info.depositId + '-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Deposit Paid'; }
+    var st = document.getElementById(info.depositId + '-status');
+    if (st) { st.classList.remove('err'); st.textContent = 'Payment confirmed.'; }
+  }
+
+  if (!isOpen) badge.classList.add('show');
+}
+
+window.addEventListener('message', function (e) {
+  if (e.origin !== window.location.origin) return;
+  var d = e.data;
+  if (!d || d.type !== 'mocof-deposit-paid') return;
+
+  var key = d.sessionId || 'unknown';
+  if (confirmedDepositSessions[key]) return;
+  confirmedDepositSessions[key] = true;
+
+  addDepositConfirmation(d.sessionId);
+});
 
 /* ── Typing indicator ────────────────────────────────── */
 function showTyping() {

@@ -60,7 +60,10 @@ async function notifyCompany(details) {
         `Wall bed model: ${details.wallBedModel || '(none)'}`,
         `Grand total: RM ${details.grandTotal || '?'}`,
         `Deposit paid: RM ${details.depositAmountPaid || '?'}`,
+        `Includes cabinetry: ${details.cabinets || '(unknown)'}`,
+        `Customer name: ${details.customerName || '(not provided)'}`,
         `Customer email: ${details.customerEmail || '(not provided)'}`,
+        `Customer phone: ${details.customerPhone || '(not provided)'}`,
         `Stripe session: ${details.stripeSessionId || '(none)'}`
     ].join('\n');
 
@@ -133,6 +136,10 @@ export default async function handler(req, res) {
 
         const details = {
             quoteRef: meta.quote_ref || null,
+            // "Yes"/"No", set by api/create-deposit.js. Null for sessions
+            // created before this field existed — those log with an empty
+            // Cabinets cell rather than being mislabelled either way.
+            cabinets: meta.cabinets || null,
             wallBedModel: meta.wall_bed_model || null,
             grandTotal: meta.grand_total || null,
             depositPercent: meta.deposit_percent || null,
@@ -140,6 +147,13 @@ export default async function handler(req, res) {
                 ? (session.amount_total / 100).toFixed(2)
                 : null,
             customerEmail: session.customer_details?.email || null,
+            // Populated by the phone_number_collection / billing_address_collection
+            // settings on the session (see api/create-deposit.js). Null on
+            // sessions created before those were enabled, and null if Stripe
+            // simply didn't capture one — logged as a blank cell either way
+            // rather than a placeholder.
+            customerName: session.customer_details?.name || null,
+            customerPhone: session.customer_details?.phone || null,
             stripeSessionId: session.id
         };
 

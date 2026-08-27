@@ -717,10 +717,42 @@ function formatRM(n) {
 // asked for a few turns back and the estimate should now be shown.
 const PRICE_INTENT_PATTERN = /\b(how\s*much|price|cost|estimate|quote|total)\b/i;
 
-function hasCabinetryPriceIntent(message, history) {
+function hasPriceIntent(message, history) {
     const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
     const turns = [...priorTurns, { role: 'user', content: message }];
     return turns.some(t => t && t.role === 'user' && t.content && PRICE_INTENT_PATTERN.test(t.content));
+}
+
+// Kept as an alias. This gate was written for — and named after — the cabinetry
+// flow, but nothing in it is cabinetry-specific, and the wall-bed-only deposit
+// path below needs the identical check. Both names are exported so existing
+// callers and tests keep working against the same single implementation.
+const hasCabinetryPriceIntent = hasPriceIntent;
+
+// Has cabinetry come up in this conversation at all? This protects the deposit
+// flow: once cabinetry is on the table, the only legitimate deposit is the
+// combined wall bed + cabinetry total. Offering a cheaper wall-bed-only deposit
+// midway — while measurements are still being collected and no combined price
+// has been shown — would put a payment button ahead of the price text, which is
+// exactly what computeDepositOffer()'s gating exists to prevent.
+//
+// Deliberately BROADER than the cabinetry module's routing regex in
+// KNOWLEDGE_MODULES, and deliberately not reusing it. That regex is narrow on
+// purpose — it must not let a generic "cabinet" (kitchen, wardrobe) claim a
+// cabinetry knowledge slot — so it does not match ordinary phrasings like
+// "a Murano Queen with cabinets". Here the error costs run the opposite way:
+// over-matching only costs a wall-bed-only deposit that goes unoffered, while
+// under-matching offers a payment for less than the quote being assembled. When
+// the two biases conflict, this one wins, so the patterns stay separate.
+//
+// Checked across BOTH roles: the assistant is often the one to raise surround
+// cabinetry, with the customer just agreeing.
+const CABINETRY_MENTION_PATTERN = /cabinet|surround/i;
+
+function hasCabinetryIntent(message, history) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    const turns = [...priorTurns, { role: 'user', content: message }];
+    return turns.some(t => t && t.content && CABINETRY_MENTION_PATTERN.test(t.content));
 }
 
 // Builds a ready-made, already-correct breakdown to inject into the system
@@ -741,7 +773,7 @@ function buildCabinetryEstimateBlock(message, history) {
         ].join('\n');
     }
 
-    if (!hasCabinetryPriceIntent(message, history)) return '';
+    if (!hasPriceIntent(message, history)) return '';
     if (!est || est.blocked) return '';
 
     const lines = [
@@ -774,25 +806,101 @@ function buildCabinetryEstimateBlock(message, history) {
 // stripe-payment-gateway-proposal-v2.md Section 1.
 const DEPOSIT_PERCENT = 10;
 
-// Mirrors buildCabinetryEstimateBlock()'s own gating EXACTLY (same price-
-// intent check, same "must be a full non-blocked grandTotal" requirement) —
-// this is deliberate, not duplicated by accident: the "Pay Deposit" button
-// must never be offered ahead of, or instead of, the price text itself. This
-// only decides whether to OFFER a deposit button in the chat response; it
-// never talks to Stripe. api/create-deposit.js re-derives this same estimate
-// independently from the conversation when the button is actually clicked,
-// so the amount charged is never trusted from what this function returned to
-// the client earlier.
-function computeDepositOffer(message, history) {
-    if (!hasCabinetryPriceIntent(message, history)) return null;
+// Deposit type identifiers. These are written into Stripe session metadata and
+// then straight into the Google Sheet column, so they are a stored data format,
+// not display strings — changing a value here changes what future Sheet rows
+// say and stops matching every row already logged.
+const DEPOSIT_TYPE_WITH_CABINETRY = 'wallbed_with_cabinetry';
+const DEPOSIT_TYPE_WALLBED_ONLY   = 'wallbed_only';
+
+// The Google Sheet's "Cabinets" column is a plain Yes/No so MOCOF can read a
+// deposit's scope at a glance. Derived from the deposit type rather than
+// tracked separately, so the two can never disagree.
+//
+// An unrecognised type returns '' on purpose. A future third deposit type
+// would otherwise be silently recorded as "No" — a confident wrong answer in a
+// business record is worse than a blank cell that visibly needs attention.
+// Lives here, not in api/create-deposit.js, so it is reachable from the test
+// suite without pulling in the stripe dependency.
+function depositIncludesCabinets(depositType) {
+    if (depositType === DEPOSIT_TYPE_WITH_CABINETRY) return 'Yes';
+    if (depositType === DEPOSIT_TYPE_WALLBED_ONLY) return 'No';
+    return '';
+}
+
+// THE single definition of "is a deposit payable in this conversation, and on
+// what amount". Both the chat response's offer (computeDepositOffer below) and
+// the actual Stripe charge (api/create-deposit.js) call this and nothing else,
+// which is what stops the quoted and charged amounts from ever diverging.
+//
+// Two paths, deliberately ordered:
+//
+//  1. Wall bed + cabinetry — the combined grand total. Gating mirrors
+//     buildCabinetryEstimateBlock() EXACTLY (same price-intent check, same
+//     "must be a full non-blocked grandTotal" requirement) so the button can
+//     never appear ahead of, or instead of, the price text itself.
+//
+//  2. Wall bed only — the model's sale price alone, for a customer who never
+//     raised cabinetry. Gated on hasCabinetryIntent() being FALSE, not merely
+//     on the cabinetry estimate being unavailable: mid-cabinetry-flow the
+//     estimate is legitimately absent while measurements are still being
+//     collected, and quietly falling back to a cheaper wall-bed-only deposit
+//     there would offer a payment for less than the quote being assembled.
+//
+// Returns null when no deposit should be offered at all.
+function getDepositBasisFromContext(message, history) {
+    if (!hasPriceIntent(message, history)) return null;
+
+    // A wall bed that cannot physically be installed at this customer's ceiling
+    // must never be taken payment for, on either path. This check was
+    // previously absent: the cabinetry flow only blocks walls under the 7ft
+    // side-cabinet minimum, so a 7ft–2.4m ceiling with a Murano selected
+    // produced a priced estimate and an offered deposit for an uninstallable
+    // bed. detectMuranoCeilingConflict() is the same constraint the system
+    // prompt is told to enforce in conversation.
+    if (detectMuranoCeilingConflict(message, history)) return null;
+
     const est = getCabinetryEstimateFromContext(message, history);
-    if (!est || est.blocked || est.grandTotal === null || typeof est.grandTotal === 'undefined') return null;
+    if (est && !est.blocked && est.grandTotal !== null && typeof est.grandTotal !== 'undefined') {
+        return {
+            type: DEPOSIT_TYPE_WITH_CABINETRY,
+            wallBedModelLabel: est.wallBedModelLabel,
+            total: est.grandTotal,
+            heightFt: est.heightFt,
+            totalWidthFt: est.totalWidthFt
+        };
+    }
+
+    // Cabinetry is on the table but not yet priced — keep collecting, offer
+    // nothing. (Also covers a blocked wall-too-short estimate.)
+    if (hasCabinetryIntent(message, history)) return null;
+
+    const pricedModel = extractSelectedWallBedPricing(history, message);
+    if (!pricedModel) return null;
 
     return {
-        wallBedModelLabel: est.wallBedModelLabel,
-        grandTotal: est.grandTotal,
+        type: DEPOSIT_TYPE_WALLBED_ONLY,
+        wallBedModelLabel: pricedModel.label,
+        total: round2(pricedModel.sale),
+        heightFt: null,
+        totalWidthFt: null
+    };
+}
+
+// Decides whether to OFFER a deposit button in the chat response; it never
+// talks to Stripe. api/create-deposit.js re-derives the basis independently
+// from the same conversation when the button is actually clicked, so the
+// amount charged is never trusted from what this returned to the client.
+function computeDepositOffer(message, history) {
+    const basis = getDepositBasisFromContext(message, history);
+    if (!basis) return null;
+
+    return {
+        depositType: basis.type,
+        wallBedModelLabel: basis.wallBedModelLabel,
+        grandTotal: basis.total,
         depositPercent: DEPOSIT_PERCENT,
-        depositAmount: round2(est.grandTotal * DEPOSIT_PERCENT / 100)
+        depositAmount: round2(basis.total * DEPOSIT_PERCENT / 100)
     };
 }
 
@@ -846,7 +954,13 @@ export {
     getCabinetryEstimateFromContext,
     computeCabinetryAllowedAmounts,
     buildCabinetryEstimateBlock,
+    hasPriceIntent,
     hasCabinetryPriceIntent,
+    hasCabinetryIntent,
+    getDepositBasisFromContext,
+    DEPOSIT_TYPE_WITH_CABINETRY,
+    DEPOSIT_TYPE_WALLBED_ONLY,
+    depositIncludesCabinets,
     detectMuranoCeilingConflict,
     buildMuranoCeilingWarningBlock,
     convertToFeet,
