@@ -124,7 +124,7 @@
           </div>
           <div class="mtime" id="stamp">Moco</div>
           <div class="synced" id="synced">A payment confirmation has also been sent to the email you used at checkout.</div>
-          <a class="back" href="/widget">Back to chat</a>
+          <a class="back" id="back" href="/widget">Back to chat</a>
         </div>
       </div>
     </div>
@@ -185,6 +185,40 @@
           'We’ve added this confirmation to your chat in the other tab. ' +
           'A payment confirmation has also been sent to the email you used at checkout.';
       }
+
+      // "Back to chat" returns the customer to the tab they were ACTUALLY
+      // chatting in, rather than navigating this tab to a fresh /widget. That
+      // distinction matters: the conversation lives entirely in that tab's
+      // memory (there is no server-side session), so loading /widget here
+      // would strand them in an empty chat having just paid.
+      //
+      // The href stays as a real fallback and is only suppressed once the
+      // opener path is actually taken — so this still works with the opener
+      // severed, the original tab closed, or JavaScript disabled.
+      document.getElementById('back').addEventListener('click', function (ev) {
+        var target;
+        try {
+          target = (window.opener && !window.opener.closed) ? window.opener : null;
+        } catch (e) {
+          target = null;
+        }
+        if (!target) return; // let the href navigate
+
+        ev.preventDefault();
+        try {
+          target.postMessage({ type: 'mocof-open-chat' }, window.location.origin);
+        } catch (e) {
+          // Non-fatal: the tab still gets focused, just not auto-opened.
+        }
+        target.focus();
+        window.close();
+
+        // window.close() can be refused (browsers only reliably honour it for
+        // script-opened tabs, and this one has been through a redirect chain).
+        // If we're still here shortly after, fall back to the plain navigation
+        // so the button is never a dead end.
+        setTimeout(function () { window.location.href = '/widget'; }, 400);
+      });
     })();
   </script>
 </body>

@@ -721,10 +721,30 @@ function addDepositConfirmation(sessionId) {
   if (!isOpen) badge.classList.add('show');
 }
 
+/* Brings the conversation into view without toggling it shut if it's already
+   open. Routed through toggleChat() when opening so the icon swap, badge, and
+   notifyParent() (which lets the storefront resize the iframe) all still run —
+   skipping that would leave the popup clipped inside a collapsed iframe. */
+function openChat() {
+  if (!isOpen) toggleChat();
+  else badge.classList.remove('show');
+  scrollDown();
+}
+
 window.addEventListener('message', function (e) {
   if (e.origin !== window.location.origin) return;
   var d = e.data;
-  if (!d || d.type !== 'mocof-deposit-paid') return;
+  if (!d) return;
+
+  /* The customer clicked "Back to chat" on the success page, which focuses
+     this tab and closes itself. Surface the conversation — the confirmation
+     bubble is already in it from the mocof-deposit-paid message. */
+  if (d.type === 'mocof-open-chat') {
+    openChat();
+    return;
+  }
+
+  if (d.type !== 'mocof-deposit-paid') return;
 
   var key = d.sessionId || 'unknown';
   if (confirmedDepositSessions[key]) return;
