@@ -44,8 +44,8 @@ import {
 
 import { generateQuoteRef, QUOTE_REF_PATTERN } from '../lib/reference.js';
 
-import { calculateCabinetPrice, getCabinetryKnowledge, SIDE_CABINET_MAX_HEIGHT_FT } from '../knowledge/cabinetry.js';
-import { getWallBedKnowledge, WALLBED_MODEL_WIDTHS_FT, WALLBED_MODEL_PRICING } from '../knowledge/wallbeds.js';
+import { calculateCabinetPrice, getCabinetryKnowledge, SIDE_CABINET_MAX_HEIGHT_FT, resolveSideCabinetHeightFt } from '../knowledge/cabinetry.js';
+import { getWallBedKnowledge, WALLBED_MODEL_WIDTHS_FT, WALLBED_MODEL_PRICING, WALLBED_MODEL_HEIGHTS_FT } from '../knowledge/wallbeds.js';
 import { getSofaBedKnowledge } from '../knowledge/sofabeds.js';
 import { getTableKnowledge } from '../knowledge/tables.js';
 import { getKitchenKnowledge } from '../knowledge/kitchen.js';
@@ -1301,5 +1301,179 @@ describe('customer contact columns (name / email / phone)', () => {
         const row = await captureSheetRow({ customerPhone: '+60123456789', stripeSessionId: 'cs_p' });
         assert.equal(row[8], '+60123456789');
         assert.equal(typeof row[8], 'string');
+    });
+});
+
+
+// ── Per-model side-cabinet height ───────────────────────────────
+// Side cabinets used to be a flat 7ft for every series. That is right for
+// Murano (209.5cm bed, 7ft module) but badly wrong for Gioco, which is the
+// horizontal-fold series and mounts far shorter — and it is not one height
+// across Gioco either, so this has to be per-model rather than per-series.
+describe('side-cabinet height is per wall bed model', () => {
+
+    const GIOCO_WIDTH_FT = 6.71; // all Gioco variants share one width
+
+    test('the height table matches the cm figures printed in the wall bed prose', () => {
+        const prose = getWallBedKnowledge();
+        for (const model of WALLBED_MODEL_HEIGHTS_FT) {
+            // Only models that actually print a Height: line can be checked.
+            const line = new RegExp('Height:\\s*' + String(model.heightCm).replace('.', '\\.') + 'cm');
+            if (!line.test(prose)) continue;
+            const expectedFt = Math.round((model.heightCm / 30.48) * 100) / 100;
+            assert.equal(model.heightFt, expectedFt,
+                model.label + ': ' + model.heightCm + 'cm should be ' + expectedFt + 'ft, table says ' + model.heightFt);
+        }
+    });
+
+    test('every priced model resolves to a height entry', () => {
+        for (const priced of WALLBED_MODEL_PRICING) {
+            const match = WALLBED_MODEL_HEIGHTS_FT.find(h => h.pattern.test(priced.label));
+            assert.ok(match, 'no height entry matches priced model: ' + priced.label);
+        }
+    });
+
+    // Murano must be untouched by this change.
+    test('every Murano model keeps the flat 7ft side cabinet', () => {
+        for (const label of ['Murano Queen', 'Murano Queen Sofa', 'Murano Queen Desk', 'Murano Queen Shelves', 'Murano Single', 'Murano King']) {
+            assert.equal(resolveSideCabinetHeightFt(label), SIDE_CABINET_MAX_HEIGHT_FT, label + ' must stay at the flat 7ft');
+        }
+    });
+
+    // The heart of the fix: Gioco heights differ BETWEEN Gioco models, so a
+    // single blanket "Gioco height" would be wrong for most of them.
+    test('each Gioco model gets its own height, not one shared series value', () => {
+        assert.equal(resolveSideCabinetHeightFt('Gioco Single'), 3.44);
+        assert.equal(resolveSideCabinetHeightFt('Gioco Single Desk'), 3.44);
+        assert.equal(resolveSideCabinetHeightFt('Gioco Queen'), 5.58);
+        assert.equal(resolveSideCabinetHeightFt('Gioco Bunk Bed'), 6.92);
+
+        const distinct = new Set(['Gioco Single', 'Gioco Queen', 'Gioco Bunk Bed'].map(resolveSideCabinetHeightFt));
+        assert.equal(distinct.size, 3, 'these three Gioco models must NOT collapse to one height');
+    });
+
+    // A bare "Gioco" is what the coarse WALLBED_MODEL_WIDTHS_FT table yields;
+    // it cannot identify the variant, so the safe answer is the old constant.
+    test('an unidentifiable model falls back to the flat 7ft, not a guess', () => {
+        assert.equal(resolveSideCabinetHeightFt('Gioco'), SIDE_CABINET_MAX_HEIGHT_FT);
+        assert.equal(resolveSideCabinetHeightFt(null), SIDE_CABINET_MAX_HEIGHT_FT);
+        assert.equal(resolveSideCabinetHeightFt(''), SIDE_CABINET_MAX_HEIGHT_FT);
+        assert.equal(resolveSideCabinetHeightFt('Some Future Bed'), SIDE_CABINET_MAX_HEIGHT_FT);
+    });
+
+    test('worked example 5 — Gioco Single, 9ft wall, 12ft total width', () => {
+        const r = calculateCabinetPrice({
+            wallHeightFt: 9, wallBedWidthFt: GIOCO_WIDTH_FT, totalWallWidthFt: 12,
+            sideCabinetHeightFt: resolveSideCabinetHeightFt('Gioco Single')
+        });
+        assert.equal(r.sideCabinetWidthFt, 2.65);
+        assert.equal(r.sideCostPerSide, 3577.5);
+        assert.equal(r.sideCostTotal, 7155);
+        assert.equal(r.topCost, 10200);
+        assert.equal(r.total, 17355);
+        assert.equal(r.sideCabinetMaxHeightFt, 3.44);
+        assert.equal(r.overheadCabinetHeightFt, 4);      // hits the cap
+        assert.equal(r.uncoveredWallHeightFt, 1.56);     // bare wall above
+    });
+
+    test('worked example 6 — Gioco Queen, same wall: same price, different heights', () => {
+        const r = calculateCabinetPrice({
+            wallHeightFt: 9, wallBedWidthFt: GIOCO_WIDTH_FT, totalWallWidthFt: 12,
+            sideCabinetHeightFt: resolveSideCabinetHeightFt('Gioco Queen')
+        });
+        assert.equal(r.total, 17355, 'price must be identical to the Gioco Single case');
+        assert.equal(r.sideCabinetMaxHeightFt, 5.58);
+        assert.equal(r.overheadCabinetHeightFt, 3.42);   // under the cap
+        assert.equal(r.uncoveredWallHeightFt, 0);
+    });
+
+    // Price is width-driven, so the whole per-model change must move no money.
+    test('changing the side-cabinet height never changes the price', () => {
+        const base = { wallHeightFt: 9, wallBedWidthFt: GIOCO_WIDTH_FT, totalWallWidthFt: 12 };
+        const totals = [3.44, 5.58, 6.92, 7].map(h =>
+            calculateCabinetPrice({ ...base, sideCabinetHeightFt: h }).total);
+        assert.equal(new Set(totals).size, 1, 'totals diverged across heights: ' + totals.join(', '));
+    });
+
+    test('omitting sideCabinetHeightFt keeps the original flat-7ft behaviour', () => {
+        const base = { wallHeightFt: 11, wallBedWidthFt: 5.5, totalWallWidthFt: 10 };
+        const implicit = calculateCabinetPrice(base);
+        const explicit = calculateCabinetPrice({ ...base, sideCabinetHeightFt: SIDE_CABINET_MAX_HEIGHT_FT });
+        assert.deepEqual(implicit, explicit);
+        assert.equal(implicit.sideCabinetMaxHeightFt, 7);
+    });
+
+    test('rejects a non-positive side-cabinet height', () => {
+        const base = { wallHeightFt: 9, wallBedWidthFt: GIOCO_WIDTH_FT, totalWallWidthFt: 12 };
+        assert.throws(() => calculateCabinetPrice({ ...base, sideCabinetHeightFt: 0 }), /sideCabinetHeightFt/);
+        assert.throws(() => calculateCabinetPrice({ ...base, sideCabinetHeightFt: -1 }), /sideCabinetHeightFt/);
+    });
+});
+
+// ── Ripple: the "wall too short" gate is per-model too ───────────
+// Gating this on the flat 7ft rejected walls that comfortably fit a short
+// Gioco — the same bug as the pricing side, in the opposite direction.
+describe('WALL_TOO_SHORT_FOR_CABINETRY uses the per-model minimum', () => {
+
+    const GIOCO_WIDTH_FT = 6.71;
+
+    test('a 5ft wall is fine for a Gioco Single but too short for a Murano', () => {
+        const gioco = calculateCabinetPrice({
+            wallHeightFt: 5, wallBedWidthFt: GIOCO_WIDTH_FT, totalWallWidthFt: 12,
+            sideCabinetHeightFt: resolveSideCabinetHeightFt('Gioco Single')
+        });
+        assert.equal(gioco.total, 17355);
+        assert.equal(gioco.overheadCabinetHeightFt, 1.56);
+
+        assert.throws(
+            () => calculateCabinetPrice({
+                wallHeightFt: 5, wallBedWidthFt: 5.48, totalWallWidthFt: 12,
+                sideCabinetHeightFt: resolveSideCabinetHeightFt('Murano Queen')
+            }),
+            (err) => err.code === 'WALL_TOO_SHORT_FOR_CABINETRY' && err.minHeightFt === 7
+        );
+    });
+
+    test('the reported minimum is that model own height, not the flat constant', () => {
+        try {
+            calculateCabinetPrice({
+                wallHeightFt: 3, wallBedWidthFt: GIOCO_WIDTH_FT, totalWallWidthFt: 12,
+                sideCabinetHeightFt: resolveSideCabinetHeightFt('Gioco Queen')
+            });
+            assert.fail('expected a too-short error');
+        } catch (err) {
+            assert.equal(err.code, 'WALL_TOO_SHORT_FOR_CABINETRY');
+            assert.equal(err.minHeightFt, 5.58);
+        }
+    });
+
+    // End-to-end through the conversation wiring, which is where the model
+    // has to be resolved off the GRANULAR pricing table — the coarse width
+    // table labels every Gioco variant just "Gioco" and cannot tell them apart.
+    test('getCabinetryEstimateFromContext prices a 5ft wall for a Gioco Single', () => {
+        const history = [
+            { role: 'user', content: 'I want a Gioco Single with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '5ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        const est = getCabinetryEstimateFromContext('12ft', history);
+        assert.ok(est, 'expected an estimate');
+        assert.ok(!est.blocked, 'a 5ft wall must NOT be blocked for a 3.44ft Gioco Single');
+        assert.equal(est.sideCabinetMaxHeightFt, 3.44);
+        assert.equal(est.total, 17355);
+    });
+
+    test('the same 5ft wall is still blocked for a Murano', () => {
+        const history = [
+            { role: 'user', content: 'I want a Murano Queen with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '5ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        const est = getCabinetryEstimateFromContext('12ft', history);
+        assert.ok(est && est.blocked, 'expected a blocked result');
+        assert.equal(est.reason, 'WALL_TOO_SHORT_FOR_CABINETRY');
+        assert.equal(est.minHeightFt, 7);
     });
 });

@@ -14,7 +14,7 @@ import { getWardrobeKnowledge } from '../knowledge/wardrobes.js';
 import { getShowroomKnowledge } from '../knowledge/showroom.js';
 import { getWarrantyKnowledge } from '../knowledge/warranty.js';
 import { getBasicFurnitureKnowledge } from '../knowledge/basicfurniture.js';
-import { getCabinetryKnowledge, calculateCabinetPrice, SIDE_CABINET_MAX_HEIGHT_FT } from '../knowledge/cabinetry.js';
+import { getCabinetryKnowledge, calculateCabinetPrice, SIDE_CABINET_MAX_HEIGHT_FT, resolveSideCabinetHeightFt } from '../knowledge/cabinetry.js';
 import { getRelevantImages } from '../knowledge/productImages.js';
 
 // Gemini's OpenAI-compatible endpoint -- same request/response shape as the
@@ -197,10 +197,15 @@ SURROUND CABINETRY ESTIMATES:
   customer's own room, not a product spec.
 - Customers may answer in feet OR metric (cm/m) — accept either, the server converts
   automatically. You don't need to ask them to restate a measurement in feet.
-- If the wall height comes in under 7ft, surround cabinetry cannot physically fit (the
-  side cabinets alone need the full 7ft) — do not calculate or state a price. Tell the
-  customer plainly it isn't possible on a wall that short, double-check it wasn't a typo,
-  and offer to help with the wall bed itself instead.
+- The minimum wall height for surround cabinetry depends on the wall bed model, because
+  the side cabinets are built to that model's height: 7ft for any Murano, but only
+  3.44ft for a Gioco Single or Single Desk, 5.58ft for a Gioco Queen, and 6.92ft for a
+  Gioco Bunk Bed. A 5ft wall is far too short for cabinetry around a Murano, yet
+  perfectly fine around a Gioco Single. If the wall height comes in below the minimum
+  for THAT model, surround cabinetry cannot physically fit — do not calculate or state
+  a price. Tell the customer plainly it isn't possible on a wall that short for the
+  model they've chosen, double-check it wasn't a typo, and offer to help with the wall
+  bed itself instead.
 - If a "PRE-CALCULATED WALL BED + CABINETRY ESTIMATE" block appears below, the server
   has already computed every line (wall bed price, side cabinets, overhead cabinet,
   cabinetry subtotal, and the GRAND TOTAL) from this customer's own chosen model and
@@ -634,6 +639,14 @@ function getCabinetryEstimateFromContext(message, history) {
     const selectedModel = extractSelectedWallBedModel(history, message);
     if (!heightFt || !selectedModel) return null;
 
+    // Side cabinets are sized against the SPECIFIC model, so resolve it off the
+    // granular pricing table rather than selectedModel above. That one comes
+    // from the coarse width table, which labels every Gioco variant just
+    // "Gioco" — useless here, since Gioco heights range from 3.44ft to 6.92ft.
+    // Falls back to the flat 7ft when the variant can't be pinned down.
+    const pricedModel = extractSelectedWallBedPricing(history, message);
+    const sideCabinetHeightFt = resolveSideCabinetHeightFt(pricedModel ? pricedModel.label : null);
+
     // Checked BEFORE calling calculateCabinetPrice() and outside the try/catch
     // below, so this specific, expected condition (wall too short to fit
     // cabinetry) is distinguishable from "not enough info yet" (e.g. total
@@ -641,15 +654,20 @@ function getCabinetryEstimateFromContext(message, history) {
     // customer, not the same silent `return null`. calculateCabinetPrice()
     // also guards this itself (defense in depth for any other caller), but
     // checking it here first lets us attach the customer-facing reason.
-    if (heightFt < SIDE_CABINET_MAX_HEIGHT_FT) {
-        return { blocked: true, reason: 'WALL_TOO_SHORT_FOR_CABINETRY', heightFt, minHeightFt: SIDE_CABINET_MAX_HEIGHT_FT };
+    //
+    // Compared against the per-model side-cabinet height, NOT the flat 7ft.
+    // Using the constant rejected walls that comfortably fit a short Gioco —
+    // a 5ft wall is plenty for a 3.44ft Gioco Single cabinet.
+    if (heightFt < sideCabinetHeightFt) {
+        return { blocked: true, reason: 'WALL_TOO_SHORT_FOR_CABINETRY', heightFt, minHeightFt: sideCabinetHeightFt };
     }
 
     try {
         const result = calculateCabinetPrice({
             wallHeightFt: heightFt,
             wallBedWidthFt: selectedModel.widthFt,
-            totalWallWidthFt: totalWidthFt ?? undefined
+            totalWallWidthFt: totalWidthFt ?? undefined,
+            sideCabinetHeightFt
         });
 
         // The customer's FINAL total for a "wall bed + surround cabinetry"
@@ -659,8 +677,8 @@ function getCabinetryEstimateFromContext(message, history) {
         // share a width but differ in price (Murano Queen vs. Queen Sofa,
         // etc.) are priced correctly. Sale price is used as "the price" here,
         // matching how sale prices are quoted elsewhere in this file (see
-        // PRODUCT RECOMMENDATION RULES).
-        const pricedModel = extractSelectedWallBedPricing(history, message);
+        // PRODUCT RECOMMENDATION RULES). Resolved above, since the side-cabinet
+        // height needs the same specific model.
         const wallBedSalePrice = pricedModel ? round2(pricedModel.sale) : null;
         const wallBedRetailPrice = pricedModel ? round2(pricedModel.retail) : null;
         const grandTotal = wallBedSalePrice !== null ? round2(wallBedSalePrice + result.total) : null;
@@ -769,7 +787,7 @@ function buildCabinetryEstimateBlock(message, history) {
     if (est && est.blocked && est.reason === 'WALL_TOO_SHORT_FOR_CABINETRY') {
         return [
             '',
-            `SURROUND CABINETRY NOT POSSIBLE FOR THIS CUSTOMER: their stated wall height is ${est.heightFt}ft, below the ${est.minHeightFt}ft minimum needed to build the side cabinets (side cabinets are always built at a fixed ${est.minHeightFt}ft — see the formula above). Do NOT calculate or state any cabinetry price. Tell the customer plainly that surround cabinetry can't fit on a wall this short, double-check the measurement in case it was a typo, and offer to help with the wall bed itself (without cabinetry) instead.`
+            `SURROUND CABINETRY NOT POSSIBLE FOR THIS CUSTOMER: their stated wall height is ${est.heightFt}ft, below the ${est.minHeightFt}ft minimum needed to build the side cabinets (for this customer's chosen wall bed model the side cabinets are built ${est.minHeightFt}ft tall — that minimum varies by model, see the formula above). Do NOT calculate or state any cabinetry price. Tell the customer plainly that surround cabinetry can't fit on a wall this short, double-check the measurement in case it was a typo, and offer to help with the wall bed itself (without cabinetry) instead.`
         ].join('\n');
     }
 

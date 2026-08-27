@@ -35,6 +35,37 @@ export const WALLBED_MODEL_PRICING = [
     { pattern: /gioco\s*bunk/i,                      label: 'Gioco Bunk Bed',       retail: 33365.56, sale: 26692.45 }
 ];
 
+// Structured HEIGHT lookup — the model's own physical height, as printed in the
+// prose below. Granularity matches WALLBED_MODEL_PRICING, NOT
+// WALLBED_MODEL_WIDTHS_FT: every Gioco happens to share one width (204.6cm), so
+// a single coarse "Gioco" entry is correct there, but heights differ sharply
+// within the series (Gioco Single 105cm vs. Gioco Queen 170cm vs. Gioco Bunk Bed
+// 211cm). Copying the width table's shape here would be wrong for at least two
+// models, so the bare patterns use the same negative lookaheads as the pricing
+// table and match order is irrelevant.
+//
+// Consumed by knowledge/cabinetry.js to size side cabinets per model. heightCm
+// is carried alongside heightFt purely so the drift test can check these against
+// the prose below, which is written in cm.
+//
+// Murano Queen Desk / Queen Shelves print "Dimensions: Custom based on room
+// width" rather than a height — they take 209.5cm because the prose states all
+// four Murano Queen variants are configurations of the same queen unit. It makes
+// no practical difference: every Murano resolves to the flat side-cabinet height
+// anyway (see resolveSideCabinetHeightFt).
+export const WALLBED_MODEL_HEIGHTS_FT = [
+    { pattern: /murano\s*queen\s*sofa/i,                    label: 'Murano Queen Sofa',    heightCm: 209.5, heightFt: 6.87 },
+    { pattern: /murano\s*queen\s*desk/i,                    label: 'Murano Queen Desk',    heightCm: 209.5, heightFt: 6.87 },
+    { pattern: /murano\s*queen\s*shelves/i,                 label: 'Murano Queen Shelves', heightCm: 209.5, heightFt: 6.87 },
+    { pattern: /murano\s*single/i,                          label: 'Murano Single',        heightCm: 209.5, heightFt: 6.87 },
+    { pattern: /murano\s*king/i,                            label: 'Murano King',          heightCm: 209.5, heightFt: 6.87 },
+    { pattern: /murano\s*queen(?!\s*(sofa|desk|shelves))/i, label: 'Murano Queen',         heightCm: 209.5, heightFt: 6.87 },
+    { pattern: /gioco\s*single\s*desk/i,                    label: 'Gioco Single Desk',    heightCm: 105,   heightFt: 3.44 },
+    { pattern: /gioco\s*queen/i,                            label: 'Gioco Queen',          heightCm: 170,   heightFt: 5.58 },
+    { pattern: /gioco\s*single(?!\s*desk)/i,                label: 'Gioco Single',         heightCm: 105,   heightFt: 3.44 },
+    { pattern: /gioco\s*bunk/i,                             label: 'Gioco Bunk Bed',       heightCm: 211,   heightFt: 6.92 }
+];
+
 export function getWallBedKnowledge() {
     return `
 WALL BED PRODUCTS — PRICING & DIMENSIONS:
@@ -104,7 +135,7 @@ GIOCO MODELS (each model below is a SEPARATE, independently purchasable product 
 
 * Gioco Bunk Bed
   - Price: RM 33,365.56 (retail) | RM 26,692.45 (sale)
-  - Dimensions: Custom twin-stack configuration
+  - Height: 211cm | Other dimensions: custom twin-stack configuration
   - Features: Double horizontal fold, integrates with adjacent wardrobes or cabinetry
 
 RECOMMENDATION GUIDE:

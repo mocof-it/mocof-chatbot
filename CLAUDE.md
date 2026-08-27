@@ -50,7 +50,8 @@ Several structured tables exist specifically so prose and code can't disagree:
 - `WALLBED_MODEL_WIDTHS_FT` — width lookup, coarse (Queen variants share a width).
 - `WALLBED_MODEL_PRICING` — price lookup, granular (Queen vs. Queen Sofa differ by ~RM9k). Bare patterns use negative lookaheads so match order is irrelevant.
 - `PRODUCT_IMAGES` — order **does** matter here; specific variants must precede the generic patterns that would also match them.
-- `SIDE_CABINET_MAX_HEIGHT_FT` (7) is exported from `knowledge/cabinetry.js` and reused as `MURANO_MIN_CEILING_FT` in `api/chat.js` so the two can never drift.
+- `WALLBED_MODEL_HEIGHTS_FT` — per-model height lookup, granular like the pricing table and **not** like the width table. All Gioco variants share one width, so a single coarse `Gioco` entry is right there; their heights range from 3.44ft to 6.92ft, so it is wrong here. Carries `heightCm` alongside `heightFt` purely so a test can check both against the prose.
+- `SIDE_CABINET_MAX_HEIGHT_FT` (7) is the Murano side-cabinet height. It is **not** the same fact as `MURANO_MIN_CEILING_FT` (2.4m ≈ 7.87ft) in `api/chat.js` — those were aliased once, which quietly under-enforced the ceiling rule, and they are deliberately independent now.
 
 `test/consistency.test.js` is **not** a general unit-test suite — it exists to catch drift between things that must agree: prompt-hardcoded prices vs. `WALLBED_MODEL_PRICING`, worked examples in `knowledge/cabinetry.js` comments vs. what `calculateCabinetPrice()` actually returns, pricing table vs. width table, every priced model vs. `PRODUCT_IMAGES` coverage. Editing a price, a formula constant, or a prompt figure without updating its counterpart will fail here — that's the point.
 
@@ -60,7 +61,14 @@ Several structured tables exist specifically so prose and code can't disagree:
 
 `extractCabinetryDimensions()` is best-effort regex parsing over the last ~10 turns, and it is **turn-aware**: the prompt asks for measurements one at a time, so customers reply with bare numbers ("9ft") carrying no context — the function reads the *assistant's preceding message* to decide whether that number is a height or a total width. Feet and metric are both accepted and converted immediately via `convertToFeet()`, so the formula and its worked examples stay in feet. Wall-bed width is never asked from the customer; the model name is detected from **either role's** turns (the assistant usually names it) and the width/price looked up. If extraction fails, the strict guardrail applies — the safe default is that no extra amounts get allowed.
 
-`getCabinetryEstimateFromContext()` is the single computation both the prompt block and the deposit offer read from, so they can never disagree. It returns three distinct shapes: `null` (still missing info — keep asking), `{ blocked: true, reason: 'WALL_TOO_SHORT_FOR_CABINETRY' }` (wall under 7ft — surface immediately, never price it), or a full estimate.
+`getCabinetryEstimateFromContext()` is the single computation both the prompt block and the deposit offer read from, so they can never disagree. It returns three distinct shapes: `null` (still missing info — keep asking), `{ blocked: true, reason: 'WALL_TOO_SHORT_FOR_CABINETRY' }` (surface immediately, never price it), or a full estimate.
+
+**Side-cabinet height is per wall bed model**, via `resolveSideCabinetHeightFt()` in `knowledge/cabinetry.js`. Murano keeps the flat `SIDE_CABINET_MAX_HEIGHT_FT` (7ft — a build constant, slightly proud of the 209.5ft bed). Each Gioco uses its own height, because the horizontal-fold series mounts far shorter and is *not* uniform within itself: Single and Single Desk 3.44ft, Queen 5.58ft, Bunk Bed 6.92ft. Resolve it off the **granular pricing table**, never the width table — the latter labels every Gioco variant just `Gioco` and cannot tell a 3.44ft Single from a 6.92ft Bunk Bed. An unresolvable model falls back to the flat 7ft, which is the conservative pre-change behaviour.
+
+Two consequences of that, both easy to get wrong:
+
+- **The minimum wall height is per-model too.** Gating `WALL_TOO_SHORT_FOR_CABINETRY` on the flat 7ft rejected walls that comfortably fit a short Gioco — a 5ft wall is fine for a 3.44ft Gioco Single. Both `calculateCabinetPrice()` and the `chat.js` pre-check compare against the resolved height.
+- **None of this moves a price.** The formula is width-driven (`leftoverWidth × RM1,350 × sides` + `totalWidth × RM850`); height only sets build heights and that minimum. A short Gioco under a normal ceiling leaves bare wall above the stack — reported as `uncoveredWallHeightFt` — because the overhead cabinet stops at its 4ft cap rather than stretching. That gap is deliberately free; there is no excess-height surcharge anywhere in this codebase, and the prose says so in several places.
 
 ### Deposit flow
 
@@ -73,7 +81,7 @@ Two paths, in priority order:
 
 `hasCabinetryIntent()` is deliberately **broader** than the cabinetry routing regex in `KNOWLEDGE_MODULES`, and deliberately does not reuse it. That regex is narrow so a generic "cabinet" can't claim a knowledge slot, and it misses ordinary phrasings like "a Murano Queen with cabinets". Here the error costs invert — over-matching only costs an unoffered deposit, under-matching offers the wrong payment — so the two patterns stay separate.
 
-Both paths refuse a deposit when `detectMuranoCeilingConflict()` fires: never take money for a bed that can't be installed at the stated ceiling. Note the cabinetry flow only blocks walls under the 7ft *side-cabinet* minimum, which is a different and lower threshold than Murano's 2.4m.
+Both paths refuse a deposit when `detectMuranoCeilingConflict()` fires: never take money for a bed that can't be installed at the stated ceiling. Note the cabinetry flow only blocks walls under the *side-cabinet* minimum for that model, which is a different — and for every model except Bunk Bed, lower — threshold than Murano's 2.4m.
 
 The `type` on the returned basis drives three things: the widget's deposit-card label, the Stripe line-item name (a wall-bed-only deposit must not say "+ Cabinetry"), and the Sheet's Cabinets column via `depositIncludesCabinets()`.
 
