@@ -1055,9 +1055,17 @@ describe('wall-bed-only deposit path', () => {
         assert.equal(offer.depositAmount, round2(offer.grandTotal * DEPOSIT_PERCENT / 100));
     });
 
-    test('still requires an explicit price question', () => {
-        assert.equal(hasPriceIntent('Do you have a Murano Queen?', WALLBED_ONLY), false);
-        assert.equal(getDepositBasisFromContext('Do you have a Murano Queen?', WALLBED_ONLY), null);
+    // Deliberately changed: a deposit is now offered once a specific wall bed
+    // has been discussed, without the customer having to ask "how much" first.
+    // Safe for this path because the bed's sale price is a fixed catalog figure
+    // the bot has already quoted, and the deposit card shows the total it
+    // charges against. The cabinetry path still waits for a price question.
+    test('no longer requires an explicit price question', () => {
+        assert.equal(hasPriceIntent('I like that one', WALLBED_ONLY), false,
+            'fixture must genuinely contain no price wording');
+        const basis = getDepositBasisFromContext('I like that one', WALLBED_ONLY);
+        assert.ok(basis, 'a settled model alone should now be enough to offer a deposit');
+        assert.equal(basis.type, DEPOSIT_TYPE_WALLBED_ONLY);
     });
 
     test('returns null when no specific model has been established', () => {
@@ -1475,5 +1483,125 @@ describe('WALL_TOO_SHORT_FOR_CABINETRY uses the per-model minimum', () => {
         assert.ok(est && est.blocked, 'expected a blocked result');
         assert.equal(est.reason, 'WALL_TOO_SHORT_FOR_CABINETRY');
         assert.equal(est.minHeightFt, 7);
+    });
+});
+
+
+// ── When the deposit offer surfaces ─────────────────────────────
+// The trigger was broadened from "only after a full wall bed + cabinetry
+// estimate" to "after any specific wall bed has been discussed". The risk that
+// creates is downgrading a cabinetry customer to the cheaper bed-only deposit,
+// so most of these tests exist to pin that it does NOT happen.
+describe('deposit offer trigger', () => {
+
+    const PLAIN_WALLBED = [
+        { role: 'user', content: 'Do you have a Murano Queen?' },
+        { role: 'assistant', content: 'Yes — the Murano Queen is RM 19,102.22 retail | RM 14,371.55 sale.' }
+    ];
+
+    // (a) the new behaviour
+    test('a plain wall-bed conversation surfaces a wallbed_only offer', () => {
+        const offer = computeDepositOffer('Sounds good', PLAIN_WALLBED);
+        assert.ok(offer, 'expected a deposit offer after discussing a specific model');
+        assert.equal(offer.depositType, DEPOSIT_TYPE_WALLBED_ONLY);
+        assert.equal(offer.wallBedModelLabel, 'Murano Queen');
+
+        const priced = WALLBED_MODEL_PRICING.find(m => m.label === 'Murano Queen');
+        assert.equal(offer.grandTotal, priced.sale, 'must charge against the bed sale price');
+        assert.equal(offer.depositAmount, round2(priced.sale * DEPOSIT_PERCENT / 100));
+    });
+
+    test('no offer until a specific model is actually settled', () => {
+        const browsing = [
+            { role: 'user', content: 'Tell me about your wall beds.' },
+            { role: 'assistant', content: 'We have two series to choose from. What is your ceiling height?' }
+        ];
+        assert.equal(computeDepositOffer('Around 9ft', browsing), null,
+            'a browsing conversation with no model chosen must not offer a deposit');
+    });
+
+    // (b) the cabinetry path must be untouched by the broadened trigger
+    test('a mid-cabinetry customer is never downgraded to wallbed_only', () => {
+        const midFlow = [
+            { role: 'user', content: 'I want a Murano Queen Sofa with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        // Height known, total width still outstanding -> no combined estimate yet.
+        assert.equal(getCabinetryEstimateFromContext('11ft', midFlow), null);
+        assert.equal(computeDepositOffer('11ft', midFlow), null,
+            'must offer nothing rather than fall back to the cheaper bed-only deposit');
+    });
+
+    test('cabinetry intent suppresses the bed-only offer even with no price question', () => {
+        const cabinetryNoPrice = [
+            { role: 'user', content: 'Can I add cabinets around a Murano Queen?' },
+            { role: 'assistant', content: 'Yes, surround cabinetry can be built around it.' }
+        ];
+        assert.equal(hasPriceIntent('ok great', cabinetryNoPrice), false);
+        assert.equal(hasCabinetryIntent('ok great', cabinetryNoPrice), true);
+        assert.equal(computeDepositOffer('ok great', cabinetryNoPrice), null);
+    });
+
+    test('a completed cabinetry estimate still offers the combined total', () => {
+        const done = [
+            { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        const offer = computeDepositOffer('10ft', done);
+        assert.ok(offer);
+        assert.equal(offer.depositType, DEPOSIT_TYPE_WITH_CABINETRY);
+
+        const bed = WALLBED_MODEL_PRICING.find(m => m.label === 'Murano Queen Sofa');
+        assert.ok(offer.grandTotal > bed.sale, 'combined total must exceed the bed alone');
+    });
+
+    // The cabinetry path keeps its own price-intent gate — only the bed-only
+    // path was broadened. This is what stops the button preceding the estimate.
+    test('the cabinetry path still waits for an explicit price question', () => {
+        const noPriceAsked = [
+            { role: 'user', content: 'I want a Murano Queen Sofa with side cabinets around it.' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        assert.equal(hasPriceIntent('10ft', noPriceAsked), false);
+        assert.equal(computeDepositOffer('10ft', noPriceAsked), null,
+            'every measurement is known but no price was ever asked — offer nothing');
+    });
+
+    test('an uninstallable Murano is still refused on the broadened trigger', () => {
+        const lowCeiling = [
+            { role: 'assistant', content: 'The Murano Queen would suit that room.' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        assert.ok(detectMuranoCeilingConflict('7.5ft', lowCeiling), 'fixture must be a real conflict');
+        assert.equal(computeDepositOffer('7.5ft', lowCeiling), null);
+    });
+});
+
+// ── The prompt-side half of the same change ─────────────────────
+describe('system prompt — reservation deposit instruction', () => {
+    const prompt = buildSystemPrompt('Tell me about the Murano Queen', []);
+
+    test('tells the model to invite a deposit once a specific model is settled', () => {
+        assert.match(prompt, /RESERVATION DEPOSIT:/);
+        assert.match(prompt, new RegExp(DEPOSIT_PERCENT + '% reservation deposit'));
+        assert.match(prompt, /SPECIFIC wall bed model/);
+    });
+
+    test('states it applies without cabinetry, and must use the grand total when cabinetry is in play', () => {
+        assert.match(prompt, /not\s+wait for cabinetry to come up/i);
+        assert.match(prompt, /GRAND TOTAL/);
+        assert.match(prompt, /never against the wall bed price alone/i);
+    });
+
+    // The model must never author payment instructions — the widget renders the
+    // button from the structured deposit field, and any RM figure the model
+    // invents would be caught by the price guardrail as a hallucination.
+    test('bars the model from writing links or stating the deposit amount', () => {
+        assert.match(prompt, /NEVER write a payment link/);
+        assert.match(prompt, /never\s+state the deposit amount in RM yourself/i);
     });
 });

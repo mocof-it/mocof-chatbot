@@ -229,6 +229,31 @@ SURROUND CABINETRY ESTIMATES:
   anywhere else.
 ${buildCabinetryEstimateBlock(message, history)}
 
+RESERVATION DEPOSIT:
+- MOCOF takes a ${DEPOSIT_PERCENT}% reservation deposit to hold an order. It goes toward the
+  final invoice, which is confirmed by a site survey.
+- Once you have discussed a SPECIFIC wall bed model with the customer — named it and
+  given its price — proactively invite them to reserve it. One short, low-pressure
+  sentence at the end of your reply, e.g. "Would you like to reserve your **Murano
+  Queen** with a ${DEPOSIT_PERCENT}% deposit?". Do not wait for them to ask about paying, and do
+  not wait for cabinetry to come up — this applies to a plain wall bed on its own.
+- Only do this once a specific model is settled. Do NOT invite a deposit while still
+  narrowing options down (e.g. you've only asked about ceiling height and room purpose,
+  or you've just listed several models to choose between) — there is nothing definite to
+  reserve yet.
+- If the customer IS discussing surround cabinetry, invite the deposit only once the
+  full wall bed + cabinetry GRAND TOTAL has been presented, and against that grand
+  total — never against the wall bed price alone. Do not offer a bed-only deposit to a
+  customer who is in the middle of a cabinetry quote; it would be for less than the
+  project they're actually pricing.
+- NEVER write a payment link, a URL, or payment instructions of any kind, and never
+  state the deposit amount in RM yourself. A separate system attaches the real payment
+  button with the exact figures — your job is only to raise the option in words. Do not
+  describe the button, and do not claim a payment has been received or confirmed.
+- If the customer says yes or asks how to pay, tell them the payment option appears just
+  below your message. If they'd rather not, drop it and carry on helping — do not ask
+  again in every reply.
+
 CRITICAL — IMAGES:
 - A separate system automatically attaches a real product photo to your reply when relevant — this happens entirely outside your control and you have no visibility into whether one will be attached to THIS reply.
 - Do NOT mention images, photos, or pictures in your text reply AT ALL — not to confirm one exists, not to deny one exists, and not to comment on your own ability to display one. This applies even when the customer explicitly asks to "see a photo" or "show me an image."
@@ -853,10 +878,10 @@ function depositIncludesCabinets(depositType) {
 //
 // Two paths, deliberately ordered:
 //
-//  1. Wall bed + cabinetry — the combined grand total. Gating mirrors
+//  1. Wall bed + cabinetry — the combined grand total. Gating still mirrors
 //     buildCabinetryEstimateBlock() EXACTLY (same price-intent check, same
 //     "must be a full non-blocked grandTotal" requirement) so the button can
-//     never appear ahead of, or instead of, the price text itself.
+//     never appear ahead of, or instead of, the combined price text.
 //
 //  2. Wall bed only — the model's sale price alone, for a customer who never
 //     raised cabinetry. Gated on hasCabinetryIntent() being FALSE, not merely
@@ -865,10 +890,18 @@ function depositIncludesCabinets(depositType) {
 //     collected, and quietly falling back to a cheaper wall-bed-only deposit
 //     there would offer a payment for less than the quote being assembled.
 //
+// The price-intent check is deliberately scoped to path 1 only. A deposit is
+// now offered after simply discussing a specific wall bed, without the
+// customer having to ask "how much" first — establishing a model is enough.
+// That is safe here in a way it would not be for cabinetry: the wall bed's
+// sale price is a fixed catalog figure the bot has already stated, and the
+// deposit card itself displays the total it is charging against, so the
+// button cannot get ahead of a price the customer hasn't seen. A cabinetry
+// grand total is assembled from measurements over several turns, so that path
+// keeps waiting for an explicit price question.
+//
 // Returns null when no deposit should be offered at all.
 function getDepositBasisFromContext(message, history) {
-    if (!hasPriceIntent(message, history)) return null;
-
     // A wall bed that cannot physically be installed at this customer's ceiling
     // must never be taken payment for, on either path. This check was
     // previously absent: the cabinetry flow only blocks walls under the 7ft
@@ -878,19 +911,23 @@ function getDepositBasisFromContext(message, history) {
     // prompt is told to enforce in conversation.
     if (detectMuranoCeilingConflict(message, history)) return null;
 
-    const est = getCabinetryEstimateFromContext(message, history);
-    if (est && !est.blocked && est.grandTotal !== null && typeof est.grandTotal !== 'undefined') {
-        return {
-            type: DEPOSIT_TYPE_WITH_CABINETRY,
-            wallBedModelLabel: est.wallBedModelLabel,
-            total: est.grandTotal,
-            heightFt: est.heightFt,
-            totalWidthFt: est.totalWidthFt
-        };
+    if (hasPriceIntent(message, history)) {
+        const est = getCabinetryEstimateFromContext(message, history);
+        if (est && !est.blocked && est.grandTotal !== null && typeof est.grandTotal !== 'undefined') {
+            return {
+                type: DEPOSIT_TYPE_WITH_CABINETRY,
+                wallBedModelLabel: est.wallBedModelLabel,
+                total: est.grandTotal,
+                heightFt: est.heightFt,
+                totalWidthFt: est.totalWidthFt
+            };
+        }
     }
 
     // Cabinetry is on the table but not yet priced — keep collecting, offer
-    // nothing. (Also covers a blocked wall-too-short estimate.)
+    // nothing. (Also covers a blocked wall-too-short estimate.) This is the
+    // anti-downgrade guard: without it, broadening the trigger above would let
+    // a mid-cabinetry customer be offered the cheaper bed-only deposit.
     if (hasCabinetryIntent(message, history)) return null;
 
     const pricedModel = extractSelectedWallBedPricing(history, message);
