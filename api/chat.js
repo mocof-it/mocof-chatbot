@@ -871,6 +871,21 @@ function depositIncludesCabinets(depositType) {
     return '';
 }
 
+// Human-readable name for a deposit type, used in the notification email's
+// subject and body. Sits beside depositIncludesCabinets() on purpose: both are
+// renderings of the SAME field (basis.type, fixed at charge time), so keeping
+// them together is what stops the email and the Sheet from ever describing one
+// payment differently.
+//
+// Returns '' for an unrecognised type, same rule and same reason as the Yes/No
+// mapping — a future third deposit type must surface as visibly missing rather
+// than be quietly mislabelled as one of the two that exist today.
+function depositTypeLabel(depositType) {
+    if (depositType === DEPOSIT_TYPE_WITH_CABINETRY) return 'Wall Bed + Cabinetry';
+    if (depositType === DEPOSIT_TYPE_WALLBED_ONLY) return 'Wall Bed Only';
+    return '';
+}
+
 // THE single definition of "is a deposit payable in this conversation, and on
 // what amount". Both the chat response's offer (computeDepositOffer below) and
 // the actual Stripe charge (api/create-deposit.js) call this and nothing else,
@@ -1016,6 +1031,7 @@ export {
     DEPOSIT_TYPE_WITH_CABINETRY,
     DEPOSIT_TYPE_WALLBED_ONLY,
     depositIncludesCabinets,
+    depositTypeLabel,
     detectMuranoCeilingConflict,
     buildMuranoCeilingWarningBlock,
     convertToFeet,

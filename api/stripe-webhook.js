@@ -13,6 +13,12 @@
 
 import Stripe from 'stripe';
 import { logDepositToSheet } from '../lib/sheetsLogger.js';
+import { buildDepositEmail } from '../lib/depositNotification.js';
+// One serverless entrypoint importing another, same as api/create-deposit.js.
+// depositTypeLabel lives beside depositIncludesCabinets (which produces the
+// Sheet's Cabinets column) so the email and the Sheet cannot describe the same
+// payment differently.
+import { depositTypeLabel } from './chat.js';
 
 // Vercel parses the request body as JSON by default. Stripe's signature
 // check needs the EXACT raw bytes the client sent — re-serializing a parsed
@@ -52,20 +58,9 @@ async function notifyCompany(details) {
     // fallback only works for accounts still on Resend's unverified test
     // sender and will be rejected otherwise.
     const fromAddress = process.env.EMAIL_FROM_ADDRESS || 'MOCOF Chatbot <onboarding@resend.dev>';
-    const subject = `New deposit paid — ${details.quoteRef || 'no ref'} (RM ${details.depositAmountPaid || '?'})`;
-    const body = [
-        `A ${details.depositPercent || '?'}% deposit has been paid.`,
-        '',
-        `Quote ref: ${details.quoteRef || '(none)'}`,
-        `Wall bed model: ${details.wallBedModel || '(none)'}`,
-        `Grand total: RM ${details.grandTotal || '?'}`,
-        `Deposit paid: RM ${details.depositAmountPaid || '?'}`,
-        `Includes cabinetry: ${details.cabinets || '(unknown)'}`,
-        `Customer name: ${details.customerName || '(not provided)'}`,
-        `Customer email: ${details.customerEmail || '(not provided)'}`,
-        `Customer phone: ${details.customerPhone || '(not provided)'}`,
-        `Stripe session: ${details.stripeSessionId || '(none)'}`
-    ].join('\n');
+    // Composed in lib/depositNotification.js — pure string building, kept out
+    // of this file so it can be unit-tested without the stripe import.
+    const { subject, text: body } = buildDepositEmail(details);
 
     // Never let a notification failure reach the caller — the webhook
     // handler awaits this outside its own try/catch, so an uncaught
@@ -140,6 +135,15 @@ export default async function handler(req, res) {
             // created before this field existed — those log with an empty
             // Cabinets cell rather than being mislabelled either way.
             cabinets: meta.cabinets || null,
+            // The charge-time deposit type itself, and its display name. Both
+            // the Cabinets column above and this label are renderings of this
+            // one field, so the Sheet and the email can never disagree.
+            depositType: meta.deposit_type || null,
+            depositTypeLabel: depositTypeLabel(meta.deposit_type),
+            // Only set on a wall-bed-plus-cabinetry deposit; empty strings on a
+            // bed-only one, which the email treats as "omit the section".
+            wallHeightFt: meta.wall_height_ft || null,
+            totalWallWidthFt: meta.total_wall_width_ft || null,
             wallBedModel: meta.wall_bed_model || null,
             grandTotal: meta.grand_total || null,
             depositPercent: meta.deposit_percent || null,

@@ -39,6 +39,7 @@ import {
     DEPOSIT_TYPE_WITH_CABINETRY,
     DEPOSIT_TYPE_WALLBED_ONLY,
     depositIncludesCabinets,
+    depositTypeLabel,
     DEPOSIT_PERCENT
 } from '../api/chat.js';
 
@@ -56,6 +57,7 @@ import { getRenovationKnowledge } from '../knowledge/renovation.js';
 import { getBasicFurnitureKnowledge } from '../knowledge/basicfurniture.js';
 import { PRODUCT_IMAGES, getRelevantImages } from '../knowledge/productImages.js';
 import { logDepositToSheet, base64url, normalizePrivateKey, getAccessToken } from '../lib/sheetsLogger.js';
+import { buildDepositEmail, UNKNOWN_TYPE_LABEL } from '../lib/depositNotification.js';
 
 import { generateKeyPairSync, createVerify } from 'node:crypto';
 
@@ -1603,5 +1605,157 @@ describe('system prompt — reservation deposit instruction', () => {
     test('bars the model from writing links or stating the deposit amount', () => {
         assert.match(prompt, /NEVER write a payment link/);
         assert.match(prompt, /never\s+state the deposit amount in RM yourself/i);
+    });
+});
+
+
+// ── Deposit notification email ──────────────────────────────────
+// The email must say, unambiguously and up front, whether a payment covers a
+// wall bed alone or a wall bed plus cabinetry. It reads that from the same
+// charge-time field as the Sheet's Cabinets column, never from the chat.
+describe('deposit notification email', () => {
+
+    const BASE = {
+        quoteRef: 'MQS-20260901-ABC234',
+        depositPercent: '10',
+        depositAmountPaid: '1437.16',
+        customerName: 'Aisyah Binti Rahman',
+        customerEmail: 'buyer@example.com',
+        customerPhone: '+60123456789',
+        stripeSessionId: 'cs_test_123',
+        recordedAt: '2026-09-01T08:15:00.000Z'
+    };
+
+    const wallbedOnly = () => buildDepositEmail({
+        ...BASE,
+        depositTypeLabel: depositTypeLabel(DEPOSIT_TYPE_WALLBED_ONLY),
+        wallBedModel: 'Murano Queen',
+        grandTotal: '14371.55',
+        wallHeightFt: null,
+        totalWallWidthFt: null
+    });
+
+    const withCabinetry = () => buildDepositEmail({
+        ...BASE,
+        depositTypeLabel: depositTypeLabel(DEPOSIT_TYPE_WITH_CABINETRY),
+        wallBedModel: 'Murano Queen Sofa',
+        grandTotal: '38300.11',
+        depositAmountPaid: '3830.01',
+        wallHeightFt: '11',
+        totalWallWidthFt: '10'
+    });
+
+    // (a) wallbed_only
+    test('a wallbed_only deposit is labelled "Wall Bed Only" in subject and body', () => {
+        const { subject, text } = wallbedOnly();
+        assert.equal(subject, 'New Deposit — Wall Bed Only (Murano Queen)');
+        assert.match(text, /^Deposit type: Wall Bed Only$/m);
+        assert.doesNotMatch(text, /Wall Bed \+ Cabinetry/);
+    });
+
+    // (b) wallbed_with_cabinetry
+    test('a wallbed_with_cabinetry deposit is labelled "Wall Bed + Cabinetry" in subject and body', () => {
+        const { subject, text } = withCabinetry();
+        assert.equal(subject, 'New Deposit — Wall Bed + Cabinetry (Murano Queen Sofa)');
+        assert.match(text, /^Deposit type: Wall Bed \+ Cabinetry$/m);
+    });
+
+    test('the deposit type is the FIRST line of the body', () => {
+        for (const { text } of [wallbedOnly(), withCabinetry()]) {
+            assert.match(text.split('\n')[0], /^Deposit type: /);
+        }
+    });
+
+    // Requirement: measurements for the cabinetry case, nothing at all for
+    // bed-only — not a section full of blanks.
+    test('cabinetry measurements appear only for the with-cabinetry deposit', () => {
+        const cab = withCabinetry().text;
+        assert.match(cab, /Wall height: 11ft/);
+        assert.match(cab, /Total wall width: 10ft/);
+
+        const only = wallbedOnly().text;
+        assert.doesNotMatch(only, /Wall height/);
+        assert.doesNotMatch(only, /Total wall width/);
+        assert.doesNotMatch(only, /Cabinetry estimate/);
+    });
+
+    test('all pre-existing body content is retained', () => {
+        for (const { text } of [wallbedOnly(), withCabinetry()]) {
+            assert.match(text, /Quote ref: MQS-20260901-ABC234/);
+            assert.match(text, /Wall bed model: /);
+            assert.match(text, /Grand total: RM /);
+            assert.match(text, /Deposit paid: RM /);
+            assert.match(text, /Customer name: Aisyah Binti Rahman/);
+            assert.match(text, /Customer email: buyer@example\.com/);
+            assert.match(text, /Customer phone: \+60123456789/);
+            assert.match(text, /Stripe session: cs_test_123/);
+            assert.match(text, /Recorded at: 2026-09-01T08:15:00\.000Z/);
+        }
+    });
+
+    // Sessions created before deposit_type existed carry no type. Saying so is
+    // correct; picking one of the two labels would be a confident lie in a
+    // record someone acts on.
+    test('an unknown deposit type is stated as unrecorded, not guessed', () => {
+        const { subject, text } = buildDepositEmail({ ...BASE, depositTypeLabel: '', wallBedModel: 'Murano King' });
+        assert.equal(subject, 'New Deposit — ' + UNKNOWN_TYPE_LABEL + ' (Murano King)');
+        assert.match(text, new RegExp('^Deposit type: ' + UNKNOWN_TYPE_LABEL + '$', 'm'));
+        assert.doesNotMatch(text, /Wall Bed Only/);
+        assert.doesNotMatch(text, /Wall Bed \+ Cabinetry/);
+    });
+
+    test('a missing model is omitted from the subject rather than rendered blank', () => {
+        const { subject } = buildDepositEmail({ ...BASE, depositTypeLabel: 'Wall Bed Only', wallBedModel: null });
+        assert.equal(subject, 'New Deposit — Wall Bed Only');
+        assert.doesNotMatch(subject, /\(\)|\(none\)|undefined|null/);
+    });
+
+    test('no field ever renders as "undefined" or "null"', () => {
+        const { subject, text } = buildDepositEmail({});
+        assert.doesNotMatch(subject + text, /undefined|null/);
+    });
+});
+
+// ── The label mapping itself ────────────────────────────────────
+describe('depositTypeLabel — single source shared with the Sheet column', () => {
+    test('maps each deposit type to its display name', () => {
+        assert.equal(depositTypeLabel(DEPOSIT_TYPE_WALLBED_ONLY), 'Wall Bed Only');
+        assert.equal(depositTypeLabel(DEPOSIT_TYPE_WITH_CABINETRY), 'Wall Bed + Cabinetry');
+    });
+
+    test('an unrecognised type yields no label, matching the Yes/No rule', () => {
+        for (const bad of ['kitchen_only', undefined, null, '']) {
+            assert.equal(depositTypeLabel(bad), '');
+            assert.equal(depositIncludesCabinets(bad), '');
+        }
+    });
+
+    // The email label and the Sheet column are two renderings of one field, so
+    // they must always agree about whether cabinetry is included.
+    test('the email label and the Sheet Cabinets column never disagree', () => {
+        for (const type of [DEPOSIT_TYPE_WALLBED_ONLY, DEPOSIT_TYPE_WITH_CABINETRY]) {
+            const includesCabinetry = depositIncludesCabinets(type) === 'Yes';
+            const labelSaysCabinetry = depositTypeLabel(type).includes('+ Cabinetry');
+            assert.equal(labelSaysCabinetry, includesCabinetry, 'mismatch for ' + type);
+        }
+    });
+
+    // Ties the label to what the deposit flow actually produces, so adding a
+    // type without extending the mapping fails here rather than in an inbox.
+    test('every deposit type the flow can produce has a label', () => {
+        const only = getDepositBasisFromContext('Sounds good', [
+            { role: 'user', content: 'Do you have a Murano Queen?' },
+            { role: 'assistant', content: 'Yes — the Murano Queen is RM 14,371.55 sale.' }
+        ]);
+        const cab = getDepositBasisFromContext('10ft', [
+            { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ]);
+        for (const basis of [only, cab]) {
+            assert.ok(basis, 'fixture should produce a deposit basis');
+            assert.notEqual(depositTypeLabel(basis.type), '', 'unlabelled deposit type: ' + basis.type);
+        }
     });
 });
