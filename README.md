@@ -29,8 +29,7 @@ Optional but commonly used:
 - `STRIPE_SECRET_KEY` — enables deposit creation
 - `STRIPE_WEBHOOK_SECRET` — verifies Stripe webhook signatures
 - `SITE_URL` — used by deposit checkout flows when not otherwise set
-- `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` — enables optional deposit notification emails
-- `EMAIL_FROM_ADDRESS` — custom sender for Resend-based email alerts
+- `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` — enable optional deposit notification emails via Resend (see [Deposit notification emails](#deposit-notification-emails))
 - `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY`, `GOOGLE_SHEETS_TAB_NAME` — optional deposit logging to Google Sheets via `lib/sheetsLogger.js`
 
 ## Quick start
@@ -175,6 +174,24 @@ Deploy this project to Vercel and configure the environment variables above. `ve
 
 Customer name, phone, and billing address are requested by the Checkout Session itself (`api/create-deposit.js`), so no Dashboard configuration is needed for them. Billing address collection is required rather than optional because that is what populates `customer_details.name` — Stripe has no standalone "collect name" setting, and the card form's cardholder-name field does not exist for FPX payments.
 
+### Deposit notification emails
+
+Confirmed deposits can trigger a notification email to MOCOF. This is optional and off by default: set both `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` to enable it. If either is unset, `api/stripe-webhook.js` logs the deposit instead of emailing — the Sheet row and Vercel function logs record it either way, so nothing is lost when email is off.
+
+**Current status: enabled.** This deployment runs with notification emails turned on using the minimal Resend setup — `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` are configured, and mail is sent from Resend's shared test sender to the configured notify inbox. `EMAIL_FROM_ADDRESS` and domain verification are not in use.
+
+Sending uses [Resend](https://resend.com) over its plain HTTP API (no SDK dependency); the message is composed in `lib/depositNotification.js`.
+
+1. Create a Resend account and an API key, and set it as `EMAIL_API_KEY`.
+2. Set `COMPANY_NOTIFY_EMAIL` to the address that should receive the alerts.
+3. Redeploy — Vercel does not apply new environment variables to a running deployment.
+
+**Sender address and the test-sender restriction.** With no `EMAIL_FROM_ADDRESS` set, the webhook sends from Resend's shared test sender (`onboarding@resend.dev`). Resend restricts that sender to delivering **only to the email address the Resend account was registered with**. So the minimal working setup is to register Resend with the inbox you want the alerts in, and set `COMPANY_NOTIFY_EMAIL` to that same address — no DNS or domain setup required. Sending to any other address returns a `403` and no email arrives (the webhook catches this and logs it rather than failing the request).
+
+To send alerts to a *different* address, verify a domain in Resend (add the DNS records it provides), then set `EMAIL_FROM_ADDRESS` to an address on that domain, e.g. `MOCOF Chatbot <deposits@mocof.com.my>`.
+
+Notifications depend on the Stripe webhook being live: the email is composed inside `api/stripe-webhook.js`, so if the webhook is not configured, no email is ever built regardless of these variables.
+
 ## Testing and CI
 
 The repository includes automated checks:
@@ -194,7 +211,8 @@ The suite is offline and needs no credentials: the Google Sheets tests stub `glo
 - Deposit confirmation does not appear in the chat after paying: expected when the original tab was closed, or if the browser severed `window.opener` on the way through Stripe. The success page still confirms the payment, and the webhook still records it — nothing is lost.
 - Sheet columns look shifted: the row must line up with the `A:K` range. A row wider than its range is truncated silently by the Sheets API, so check both together after adding a column.
 - Stripe webhook returns 400: verify `STRIPE_WEBHOOK_SECRET` matches the endpoint and the body parser is disabled in `api/stripe-webhook.js`.
-- Deposit logging is missing: confirm `GOOGLE_SHEETS_*` variables or the optional email env vars are configured.
+- Deposit logging is missing: confirm the `GOOGLE_SHEETS_*` variables are configured.
+- Deposit notification email not arriving: confirm both `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` are set and that you redeployed afterwards. On Resend's test sender (no `EMAIL_FROM_ADDRESS`), `COMPANY_NOTIFY_EMAIL` must be your own Resend account email, or Resend returns a `403` — check the `stripe-webhook` function logs for the error.
 
 ## Notes
 
