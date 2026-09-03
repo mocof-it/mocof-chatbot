@@ -14,6 +14,7 @@ import { getWardrobeKnowledge } from '../knowledge/wardrobes.js';
 import { getShowroomKnowledge } from '../knowledge/showroom.js';
 import { getWarrantyKnowledge } from '../knowledge/warranty.js';
 import { getBasicFurnitureKnowledge } from '../knowledge/basicfurniture.js';
+import { getBedsheetKnowledge } from '../knowledge/bedsheets.js';
 import { getCabinetryKnowledge, calculateCabinetPrice, SIDE_CABINET_MAX_HEIGHT_FT, resolveSideCabinetHeightFt } from '../knowledge/cabinetry.js';
 import { getRelevantImages } from '../knowledge/productImages.js';
 
@@ -45,6 +46,7 @@ const KNOWLEDGE_MODULES = [
     { key: 'table', test: /table|dining|desk|study/, fn: getTableKnowledge },
     { key: 'kitchen', test: /kitchen|cabinet|cabinetry|cooking|pantry/, fn: getKitchenKnowledge },
     { key: 'wardrobe', test: /wardrobe|closet|clothes|storage|walk-in|cabinet/, fn: getWardrobeKnowledge },
+    { key: 'bedsheet', test: /bedsheet|bed sheet|bedding|duvet|quilt|comforter|pillow|bolster|cushion|towel|bath mat|tencel|egyptian cotton|pure cotton|signoria|fitted sheet|flat ?sheet|thread count|mattress protector/, fn: getBedsheetKnowledge },
     { key: 'showroom', test: /showroom|visit|location|address|trx|maison|appointment|open|hour/, fn: getShowroomKnowledge },
     { key: 'warranty', test: /warranty|guarantee|claim|repair|after.?sales|defect/, fn: getWarrantyKnowledge },
     { key: 'renovation', test: /renovation|interior|design|house|condo|budget|layout|floor plan|material|panel|laminate|formaldehyde|\bENF\b|finish(es|ing)?|champagne luxe|walnut cocoa|glacier mirror/i, fn: getRenovationKnowledge },
@@ -431,6 +433,7 @@ const MASTER_PRICE_LIST = extractAmounts([
     getWarrantyKnowledge(),
     getRenovationKnowledge(),
     getBasicFurnitureKnowledge(),
+    getBedsheetKnowledge(),
     getCabinetryKnowledge() // includes the RM1,350 / RM800 unit rates + worked examples
 ].join('\n'));
 
@@ -1187,4 +1190,3 @@ export default async function handler(req, res) {
         });
     }
 }
-
