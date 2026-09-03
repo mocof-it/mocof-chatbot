@@ -1,6 +1,6 @@
 ﻿# MOCOF Chatbot
 
-A Vercel-hosted AI chatbot for MOCOF that answers product questions, helps shortlist wall beds and furniture, calculates surround-cabinetry estimates, and can offer a 10% reservation deposit through Stripe.
+A Vercel-hosted AI chatbot for MOCOF that answers product questions, helps shortlist wall beds, furniture, and bedding, calculates surround-cabinetry estimates, and can offer a 10% reservation deposit through Stripe.
 
 ## Overview
 
@@ -68,6 +68,7 @@ curl -X POST http://localhost:3000/api/chat \
 - `knowledge/` — product and service knowledge modules used to guide responses
 - `knowledge/productImages.js` — maps product names to real catalog photos
 - `knowledge/cabinetry.js` — surround-cabinetry pricing formula and related constants
+- `knowledge/bedsheets.js` — bedding and bath catalog (Signoria Firenze, Luxury Tencel, Egyptian Cotton, Pure Cotton, accessories, cushions, bath)
 - `lib/reference.js` — generates `MQS-YYYYMMDD-XXXXXX` quote references for Stripe metadata
 - `lib/sheetsLogger.js` — logs confirmed deposits to Google Sheets when configured
 - `GOOGLE_SHEETS_CREDENTIALS.md` — Sheet column list, and how the Google service-account credentials are provisioned
@@ -97,6 +98,7 @@ Important details:
 - room-purpose and ceiling-height logic affect wall-bed recommendations
 - `basicfurniture.js` is automatically included as a companion source when relevant to product categories such as wall beds, sofas, tables, kitchens, and wardrobes
 - knowledge is intentionally bounded so a single message does not expand into an oversized prompt
+- catalog modules that change often — `bedsheets.js` and `basicfurniture.js` — carry material tiers, price ranges, and representative products rather than every SKU, and end by pointing at WhatsApp for anything not named
 
 ### Pricing guardrail
 
@@ -107,6 +109,8 @@ The bot does not assume all prices in a model response are valid. Before returni
 - live calculated surround-cabinetry totals for the current conversation
 
 If a reply contains an unrecognized price, the bot safely falls back to a generic WhatsApp confirmation instead of sending an incorrect quote.
+
+Every knowledge module feeds this list, so any `RM` figure written into one is quotable as soon as it is registered in `MASTER_PRICE_LIST`. A module left out of that array has its prices treated as hallucinations and suppressed — which is why adding a knowledge file is never just creating the file.
 
 ### Surround-cabinetry estimation
 
@@ -205,6 +209,7 @@ The suite is offline and needs no credentials: the Google Sheets tests stub `glo
 ## Troubleshooting
 
 - `500` or "API key missing": ensure `GEMINI_API_KEY` is set.
+- Every chat request fails after adding a knowledge module: check the import path against the real filename. A typo there breaks `api/chat.js` at load time, which takes `/api/create-deposit` down with it since it imports `chat.js`. `npm test` still passes — the import check (`node -e "import('./api/chat.js')"`, which CI runs over every entrypoint) is what catches it.
 - `502` or Gemini API errors: verify the key is valid and the endpoint is reachable.
 - Price response seems blocked unexpectedly: check logs for the guardrail message and inspect whether the amount was recognized.
 - Deposit button does not appear: a price question must have been asked, and a specific wall bed model established. If cabinetry has been mentioned, the button waits for the full combined estimate rather than offering the bed alone. A Murano below the 2.4 m ceiling minimum is never offered a deposit.

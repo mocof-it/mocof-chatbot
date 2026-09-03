@@ -55,6 +55,7 @@ import { getShowroomKnowledge } from '../knowledge/showroom.js';
 import { getWarrantyKnowledge } from '../knowledge/warranty.js';
 import { getRenovationKnowledge } from '../knowledge/renovation.js';
 import { getBasicFurnitureKnowledge } from '../knowledge/basicfurniture.js';
+import { getBedsheetKnowledge } from '../knowledge/bedsheets.js';
 import { PRODUCT_IMAGES, getRelevantImages } from '../knowledge/productImages.js';
 import { logDepositToSheet, base64url, normalizePrivateKey, getAccessToken } from '../lib/sheetsLogger.js';
 import { buildDepositEmail, UNKNOWN_TYPE_LABEL } from '../lib/depositNotification.js';
@@ -724,6 +725,7 @@ describe('knowledge module content sanity', () => {
         ['warranty', getWarrantyKnowledge()],
         ['renovation', getRenovationKnowledge()],
         ['basicfurniture', getBasicFurnitureKnowledge()],
+        ['bedsheets', getBedsheetKnowledge()],
         ['cabinetry', getCabinetryKnowledge()]
     ];
 
