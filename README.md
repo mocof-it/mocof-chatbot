@@ -192,7 +192,19 @@ Sending uses [Resend](https://resend.com) over its plain HTTP API (no SDK depend
 
 **Sender address and the test-sender restriction.** With no `EMAIL_FROM_ADDRESS` set, the webhook sends from Resend's shared test sender (`onboarding@resend.dev`). Resend restricts that sender to delivering **only to the email address the Resend account was registered with**. So the minimal working setup is to register Resend with the inbox you want the alerts in, and set `COMPANY_NOTIFY_EMAIL` to that same address — no DNS or domain setup required. Sending to any other address returns a `403` and no email arrives (the webhook catches this and logs it rather than failing the request).
 
-To send alerts to a *different* address, verify a domain in Resend (add the DNS records it provides), then set `EMAIL_FROM_ADDRESS` to an address on that domain, e.g. `MOCOF Chatbot <deposits@mocof.com.my>`.
+**Why the domain isn't verified with Resend.** Short version: `mocof.com.my` cannot complete Resend's standard domain verification while its DNS is hosted at Wix, so this deployment stays on the test sender deliberately — it is not an unfinished setup step.
+
+- The domain's nameservers are `ns2.wixdns.net` and `ns3.wixdns.net`, so every DNS record is edited **inside Wix**, not at the original registrar.
+- Resend's standard verification requires an **MX record on a sending subdomain** (e.g. `send.mocof.com.my`). That MX record is what receives Resend's Return-Path traffic — bounces and complaints — and it forms part of the SPF setup.
+- **Wix does not allow MX records on subdomains.** It supports them only on the root domain, and those root MX records are already in use by Google Workspace to receive `@mocof.com.my` mail. They must not be touched.
+- With no way to create the subdomain MX record Resend asks for, verification cannot be completed through Wix DNS.
+
+That is why `EMAIL_FROM_ADDRESS` is intentionally left unset. `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` are both set, and `COMPANY_NOTIFY_EMAIL` is the same address the Resend account is registered under — the only address the shared test sender is permitted to deliver to. One practical consequence to expect: mail from `onboarding@resend.dev` is unauthenticated for our domain and commonly lands in spam, so whitelist it in the receiving inbox.
+
+**Future options for sending to a different address** (a shared sales inbox, say), cheapest first:
+
+1. **Re-add the domain in Resend and check for a CNAME-based sending setup.** Wix *can* create subdomain CNAMEs, so if Resend offers that path it sidesteps the subdomain-MX limitation entirely. Check this before considering option 2 — it costs nothing to try.
+2. **Move the domain's DNS to a provider that supports subdomain MX records** (Cloudflare, for example), then verify the domain in Resend and set `EMAIL_FROM_ADDRESS`. This means recreating *every* existing record at the new provider — the Google Workspace MX records, the Wix site records, and any existing verification TXT records. Treat it as a planned migration with mail downtime risk, not a quick change.
 
 Notifications depend on the Stripe webhook being live: the email is composed inside `api/stripe-webhook.js`, so if the webhook is not configured, no email is ever built regardless of these variables.
 
