@@ -820,7 +820,32 @@ function buildCabinetryEstimateBlock(message, history) {
     }
 
     if (!hasPriceIntent(message, history)) return '';
-    if (!est || est.blocked) return '';
+
+    // A blocked estimate for any reason other than the wall-too-short case
+    // (handled above) — stay silent rather than asking for more measurements.
+    if (est && est.blocked) return '';
+
+    // Price intent is present but there's no usable estimate yet — which input
+    // is still missing (or was just answered with something unparseable, which
+    // leaves it null)? Tell the model to KEEP asking for it. Without this the
+    // function returns '' here and injects no guidance, so a wrong/blank answer
+    // silently ends the measurement flow and the deposit option never appears.
+    if (!est) {
+        const { heightFt, totalWidthFt } = extractCabinetryDimensions(history, message);
+        const selectedModel = extractSelectedWallBedModel(history, message);
+
+        const missing = [];
+        if (!selectedModel) missing.push('which wall bed model they want (e.g. Murano Queen or Gioco Queen)');
+        if (!heightFt) missing.push('the wall/ceiling HEIGHT (in ft or m)');
+        if (totalWidthFt === null || totalWidthFt === undefined) missing.push('the TOTAL WALL WIDTH (in ft or m)');
+
+        if (missing.length === 0) return '';
+
+        return [
+            '',
+            `CABINETRY ESTIMATE — INPUT(S) STILL MISSING, KEEP ASKING: the customer wants a wall bed + surround cabinetry estimate, but you do not yet have: ${missing.join('; ')}. Ask for the missing item(s) ONE at a time, in a friendly, natural way. If the customer's last reply was not a clear measurement (blank, unsure, a question back, or an obviously wrong / out-of-range number), gently acknowledge it and ask again for that SAME measurement — do not drop the topic, move on, or go silent. You cannot give an estimate (or offer the reservation deposit) until you have every item above, so keep the conversation focused on collecting them.`
+        ].join('\n');
+    }
 
     const lines = [
         '',

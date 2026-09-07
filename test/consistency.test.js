@@ -1761,3 +1761,39 @@ describe('depositTypeLabel — single source shared with the Sheet column', () =
         }
     });
 });
+
+describe('cabinetry: keeps asking when a measurement answer is unusable', () => {
+    const priceIntentHistory = (lastUser) => ([
+        { role: 'user', content: 'I want a Murano Queen with surround cabinets, how much?' },
+        { role: 'assistant', content: 'Sure! What is the height of your wall?' },
+        { role: 'user', content: lastUser }
+    ]);
+
+    test('a non-measurement reply re-prompts instead of going silent', () => {
+        const out = buildCabinetryEstimateBlock('not sure, quite tall lah', priceIntentHistory('not sure, quite tall lah'));
+        assert.match(out, /KEEP ASKING/);
+        assert.match(out, /HEIGHT/);
+        assert.match(out, /TOTAL WALL WIDTH/);
+    });
+
+    test('once height is given, it keeps asking only for the still-missing width', () => {
+        const history = [
+            { role: 'user', content: 'Murano Queen with cabinets, how much?' },
+            { role: 'assistant', content: 'What is the height of your wall?' },
+            { role: 'user', content: '9ft' },
+            { role: 'assistant', content: 'And the total wall width?' },
+            { role: 'user', content: 'dunno' }
+        ];
+        const out = buildCabinetryEstimateBlock('dunno', history);
+        assert.match(out, /KEEP ASKING/);
+        assert.match(out, /TOTAL WALL WIDTH/);
+        assert.doesNotMatch(out, /the wall\/ceiling HEIGHT/); // height already collected
+    });
+
+    test('no keep-asking noise when there is no cabinetry price intent', () => {
+        const out = buildCabinetryEstimateBlock('do you sell wall beds?', [
+            { role: 'user', content: 'do you sell wall beds?' }
+        ]);
+        assert.equal(out, '');
+    });
+});
