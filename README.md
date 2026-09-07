@@ -122,6 +122,8 @@ When a customer asks for a wall bed plus cabinetry estimate, the app uses the sa
 
 The app then injects the computed breakdown into the system prompt so the model can present the exact figures without recalculating them.
 
+All three inputs are required. Until every one is known, the prompt instead carries an instruction naming the specific item(s) still missing and telling the model to keep asking for them one at a time — including re-asking when a reply was blank, unparseable, or out of range. Without that, an unusable answer would silently end the measurement flow, and neither the estimate nor the deposit offer would ever appear.
+
 ### Deposit flow
 
 The widget can show a "Pay 10% Deposit" button in two situations:
@@ -185,6 +187,8 @@ Confirmed deposits can trigger a notification email to MOCOF. This is optional a
 **Current status: enabled.** This deployment runs with notification emails turned on using the minimal Resend setup — `EMAIL_API_KEY` and `COMPANY_NOTIFY_EMAIL` are configured, and mail is sent from Resend's shared test sender to the configured notify inbox. `EMAIL_FROM_ADDRESS` and domain verification are not in use.
 
 Sending uses [Resend](https://resend.com) over its plain HTTP API (no SDK dependency); the message is composed in `lib/depositNotification.js`.
+
+Each notification goes out as **both an HTML table and a plain-text version**, in one message. Clients that render HTML show the table; the rest fall back to the text, which also helps deliverability. Both carry identical data, so neither is a summary of the other. The HTML uses inline styles only — email clients strip `<style>` blocks — and every interpolated value is HTML-escaped, since customer names and emails arrive from Stripe metadata and could otherwise break the markup.
 
 1. Create a Resend account and an API key, and set it as `EMAIL_API_KEY`.
 2. Set `COMPANY_NOTIFY_EMAIL` to the address that should receive the alerts.
