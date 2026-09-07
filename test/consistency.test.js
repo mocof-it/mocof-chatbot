@@ -1716,6 +1716,100 @@ describe('deposit notification email', () => {
         const { subject, text } = buildDepositEmail({});
         assert.doesNotMatch(subject + text, /undefined|null/);
     });
+
+    // ── HTML rendering ──────────────────────────────────────────
+    // Management reads the HTML table; the plain text above stays as the
+    // fallback for clients that don't render HTML. Both must always show the
+    // same data, so these mirror the text assertions rather than replacing them.
+    test('both renderings are returned, and the html is a table', () => {
+        for (const built of [wallbedOnly(), withCabinetry()]) {
+            assert.equal(typeof built.html, 'string');
+            assert.ok(built.html.length > 0, 'html should not be empty');
+            assert.match(built.html, /<table[\s>]/, 'html should contain a table');
+            assert.match(built.html, /<\/table>/);
+            assert.ok(built.text.length > 0, 'text fallback must survive alongside the html');
+        }
+    });
+
+    // Email clients strip <style> blocks and <head>, so a class-based layout
+    // would silently arrive unstyled. Styling has to be inline to survive.
+    test('the html styles inline and pulls in no external resources', () => {
+        const { html } = withCabinetry();
+        assert.match(html, /style="/, 'expected inline styles');
+        assert.doesNotMatch(html, /<style/i, 'a <style> block would be stripped by Gmail/Outlook');
+        assert.doesNotMatch(html, /class=/, 'CSS classes have nothing to resolve against in email');
+        assert.doesNotMatch(html, /<img|<script|@import|https?:\/\//i, 'no external images, fonts, or JS');
+    });
+
+    // Customer-supplied values reach this template straight from Stripe
+    // metadata. An unescaped "&" or "<" would corrupt the table at best and
+    // inject markup at worst.
+    test('html-special characters in customer fields are escaped', () => {
+        const { html } = buildDepositEmail({
+            ...BASE,
+            depositTypeLabel: 'Wall Bed Only',
+            wallBedModel: 'Murano <Queen> & Co',
+            customerName: 'Tan & Sons <script>alert(1)</script>',
+            customerEmail: 'a"b@example.com'
+        });
+
+        assert.doesNotMatch(html, /<script>/, 'raw script tag must never survive into the markup');
+        assert.ok(html.includes('Tan &amp; Sons'), 'ampersand should be escaped');
+        assert.ok(html.includes('&lt;script&gt;'), 'angle brackets should be escaped');
+        assert.ok(html.includes('Murano &lt;Queen&gt; &amp; Co'), 'model should be escaped too');
+        assert.ok(html.includes('a&quot;b@example.com'), 'double quotes should be escaped');
+        // The escaping must not double-encode: "&amp;amp;" would display literally.
+        assert.doesNotMatch(html, /&amp;(amp|lt|gt|quot);/, 'values must not be double-escaped');
+    });
+
+    test('the deposit type is prominent in the html, not buried', () => {
+        assert.match(wallbedOnly().html, /Deposit type:\s*Wall Bed Only/);
+        assert.match(withCabinetry().html, /Deposit type:\s*Wall Bed \+ Cabinetry/);
+    });
+
+    // Same conditional rule as the text version: omit the section, never
+    // render blank rows for a deposit that has no wall being surveyed.
+    test('cabinetry rows appear in the html only for the with-cabinetry deposit', () => {
+        const cab = withCabinetry().html;
+        assert.match(cab, /Wall height/);
+        assert.match(cab, /11ft/);
+        assert.match(cab, /Total wall width/);
+        assert.match(cab, /10ft/);
+
+        const only = wallbedOnly().html;
+        assert.doesNotMatch(only, /Wall height/);
+        assert.doesNotMatch(only, /Total wall width/);
+        assert.doesNotMatch(only, /Cabinetry estimate/);
+    });
+
+    test('the html carries the same values and RM formatting as the text', () => {
+        const { html } = withCabinetry();
+        assert.match(html, /MQS-20260901-ABC234/);
+        assert.match(html, /Murano Queen Sofa/);
+        assert.match(html, /RM 38300\.11/);
+        assert.match(html, /RM 3830\.01/);
+        assert.match(html, /Aisyah Binti Rahman/);
+        assert.match(html, /buyer@example\.com/);
+        assert.match(html, /\+60123456789/);
+        assert.match(html, /cs_test_123/);
+    });
+
+    test('missing fields fall back in the html exactly as they do in the text', () => {
+        const { html } = buildDepositEmail({});
+        assert.match(html, /\(none\)/, 'expected the (none) fallback');
+        assert.match(html, /\(not provided\)/, 'expected the (not provided) fallback');
+        assert.doesNotMatch(html, />\s*undefined\s*</, 'no field should render as undefined');
+        assert.doesNotMatch(html, />\s*null\s*</, 'no field should render as null');
+    });
+
+    // The two renderings are stamped from one resolved timestamp, so a payment
+    // cannot appear to have been recorded at two different times.
+    test('text and html agree on the recorded-at timestamp when none is supplied', () => {
+        const { text, html } = buildDepositEmail({ depositTypeLabel: 'Wall Bed Only' });
+        const stamp = text.match(/Recorded at: (.+)$/m);
+        assert.ok(stamp, 'text should carry a recorded-at timestamp');
+        assert.ok(html.includes(stamp[1]), 'html should carry the identical timestamp');
+    });
 });
 
 // ── The label mapping itself ────────────────────────────────────

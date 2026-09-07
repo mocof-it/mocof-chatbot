@@ -60,7 +60,7 @@ async function notifyCompany(details) {
     const fromAddress = process.env.EMAIL_FROM_ADDRESS || 'MOCOF Chatbot <onboarding@resend.dev>';
     // Composed in lib/depositNotification.js — pure string building, kept out
     // of this file so it can be unit-tested without the stripe import.
-    const { subject, text: body } = buildDepositEmail(details);
+    const { subject, text: body, html } = buildDepositEmail(details);
 
     // Never let a notification failure reach the caller — the webhook
     // handler awaits this outside its own try/catch, so an uncaught
@@ -78,7 +78,11 @@ async function notifyCompany(details) {
                 from: fromAddress,
                 to: [process.env.COMPANY_NOTIFY_EMAIL],
                 subject,
-                text: body
+                // Sent together on purpose: Resend renders the HTML table where
+                // the client supports it and falls back to the plain text where
+                // it does not. Both carry identical data.
+                text: body,
+                html
             })
         });
 
