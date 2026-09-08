@@ -234,11 +234,18 @@ ${buildCabinetryEstimateBlock(message, history)}
 RESERVATION DEPOSIT:
 - MOCOF takes a ${DEPOSIT_PERCENT}% reservation deposit to hold an order. It goes toward the
   final invoice, which is confirmed by a site survey.
-- Once you have discussed a SPECIFIC wall bed model with the customer — named it and
-  given its price — proactively invite them to reserve it. One short, low-pressure
-  sentence at the end of your reply, e.g. "Would you like to reserve your **Murano
-  Queen** with a ${DEPOSIT_PERCENT}% deposit?". Do not wait for them to ask about paying, and do
-  not wait for cabinetry to come up — this applies to a plain wall bed on its own.
+- Invite a reservation ONLY when BOTH are true: a SPECIFIC wall bed model has been
+  named and priced, AND the customer has signalled they want to buy or reserve THAT
+  model (e.g. "I want the Murano Queen", "I'll take it", "can I order one?", "how do I
+  reserve?"). Then add one short, low-pressure sentence at the end of your reply, e.g.
+  "Would you like to reserve your **Murano Queen** with a ${DEPOSIT_PERCENT}% deposit?".
+- If the customer is only asking whether a product exists, what it costs, or anything
+  else informational — "Do you have a Murano Single?", "Is there a Gioco Queen?",
+  "How much is it?", "Tell me about it" — just answer the question. Do NOT mention
+  deposits or reserving. Wanting to KNOW about a bed is not wanting to buy one, and
+  answering an availability question with a payment prompt reads as a hard sell.
+- You do not need to wait for cabinetry to come up — a plain wall bed on its own can
+  be reserved, once the customer has shown they want it.
 - Only do this once a specific model is settled. Do NOT invite a deposit while still
   narrowing options down (e.g. you've only asked about ceiling height and room purpose,
   or you've just listed several models to choose between) — there is nothing definite to
@@ -813,6 +820,68 @@ function hasCabinetryIntent(message, history) {
     return turns.some(t => t && t.content && CABINETRY_MENTION_PATTERN.test(t.content));
 }
 
+// Has the customer signalled they want to BUY or RESERVE, as opposed to merely
+// asking about a product? This gates the wall-bed-only deposit path. Without it,
+// "Is there a Murano Single?" produced a payment button the moment the bot named
+// a price — an availability question answered with a checkout prompt.
+//
+// The distinction that actually matters here is "I want to <purchase verb>"
+// versus "I want to <informational verb>": "I want the Murano Single" is buy
+// intent, "I want to know about the Murano Single" is not, and a bare `want`
+// cannot tell them apart. So `want` never matches alone — it only counts when
+// tied to a purchase verb ("want to buy/order/reserve") or directly to the
+// product ("want the/a/this/it"). Permissive verbs that read both ways — get,
+// take, have — additionally require a concrete object, because "I want to get a
+// quote" is a price question wearing a purchase verb's clothes.
+//
+// Unlike hasCabinetryIntent(), this scans USER turns only. The assistant asking
+// "would you like to reserve it?" is not the customer agreeing to.
+//
+// Erring toward under-matching is deliberate and the opposite of the cabinetry
+// gate's bias: a missed offer costs a customer who has to ask how to pay, while
+// a false one puts a checkout button in front of somebody who only asked whether
+// a product exists. The former is a small friction; the latter reads as a hard
+// sell and is the bug this was written to fix.
+const PURCHASE_INTENT_INFO_NOUN = '(?:info|information|idea|quote|price|pricing|cost|estimate|detail|details|brochure|catalog|catalogue|list|link|address|number|photo|picture|image)';
+const PURCHASE_INTENT_BUY_VERB = '(?:buy|order|reserve|purchase|pay|book|place)';
+
+const PURCHASE_INTENT_PATTERN = new RegExp([
+    // "I want to buy", "I'd like to order", "I want to reserve"
+    `\\b(?:want(?:s|ed)?|would\\s+like|'d\\s+like)\\s+to\\s+${PURCHASE_INTENT_BUY_VERB}\\b`,
+    // "wanna" already carries the "to", so it gets its own clause.
+    `\\bwanna\\s+${PURCHASE_INTENT_BUY_VERB}\\b`,
+    // "I want to get one" / "...to take the Murano". Permissive verbs, so the
+    // object must not be informational — "want to get a quote" is not buying.
+    `\\b(?:want(?:s|ed)?|wanna|would\\s+like|'d\\s+like)\\s+to\\s+(?:get|take|have)\\s+(?:it\\b|one\\b|this\\b|that\\b|(?:the|a|an|some)\\s+(?!${PURCHASE_INTENT_INFO_NOUN}\\b))`,
+    // "I want the Murano Single", "I'd like a Gioco Queen" — same object guard,
+    // which is what keeps "I want the price" and "I want a quote" out.
+    `\\bi\\s*(?:'d\\s+like|would\\s+like|want(?:s|ed)?)\\s+(?:the|a|an)\\s+(?!${PURCHASE_INTENT_INFO_NOUN}\\b)`,
+    // "I want it", "I want this one", "I'd like that"
+    `\\bi\\s*(?:'d\\s+like|would\\s+like|want(?:s|ed)?)\\s+(?:it|this|that|these|those)\\b`,
+    // "I'll take it", "I'll get it", "I will buy it"
+    `\\bi\\s*(?:'ll|\\s+will)\\s+(?:take|get|buy|order|reserve|purchase|have)\\b`,
+    // "can I buy", "how do I order", "how do I reserve"
+    `\\b(?:can|could|how\\s+do|how\\s+can|how\\s+would|where\\s+do|where\\s+can)\\s+i\\s+${PURCHASE_INTENT_BUY_VERB}\\b`,
+    // "can I get one", "how do I get one" — 'get' needs a concrete object.
+    `\\b(?:can|could|how\\s+do|how\\s+can|where\\s+do|where\\s+can)\\s+i\\s+get\\s+(?:one|it|this|that)\\b`,
+    // "let's reserve", "lets book it", "let's proceed"
+    `\\blet'?s\\s+(?:reserve|book|order|buy|proceed|go\\s+ahead|do\\s+it)\\b`,
+    // "reserve it", "book this one", "reserve the Murano"
+    `\\b(?:reserve|book)\\s+(?:it|this|that|one|mine|the|a|an)\\b`,
+    // "put down a deposit", "pay the deposit", "place my deposit"
+    `\\b(?:put\\s+down|pay|make|place|leave)\\s+(?:a|the|my)?\\s*deposit\\b`,
+    // "sign me up"
+    '\\bsign\\s+me\\s+up\\b',
+    // "I'm ready to buy/order/reserve"
+    `\\b(?:i'?m|i\\s+am)\\s+ready\\s+to\\s+${PURCHASE_INTENT_BUY_VERB}\\b`
+].join('|'), 'i');
+
+function hasPurchaseIntent(message, history) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    const turns = [...priorTurns, { role: 'user', content: message }];
+    return turns.some(t => t && t.role === 'user' && t.content && PURCHASE_INTENT_PATTERN.test(t.content));
+}
+
 // Builds a ready-made, already-correct breakdown to inject into the system
 // prompt when we have enough measurements. The model is told to relay these
 // exact figures rather than compute them itself — this removes reliance on
@@ -988,6 +1057,16 @@ function getDepositBasisFromContext(message, history) {
     const pricedModel = extractSelectedWallBedPricing(history, message);
     if (!pricedModel) return null;
 
+    // A priced model is not by itself a reason to ask for money. "Is there a
+    // Murano Single?" resolves a specific model and its price, and used to be
+    // answered with a deposit button — an availability question met with a
+    // checkout prompt. The customer must have signalled they actually want it.
+    //
+    // Only this path needs the check. The cabinetry path above already requires
+    // an explicit price request PLUS the customer measuring their own wall over
+    // several turns, which is a far stronger buy signal than any phrase match.
+    if (!hasPurchaseIntent(message, history)) return null;
+
     return {
         type: DEPOSIT_TYPE_WALLBED_ONLY,
         wallBedModelLabel: pricedModel.label,
@@ -1067,6 +1146,8 @@ export {
     hasPriceIntent,
     hasCabinetryPriceIntent,
     hasCabinetryIntent,
+    hasPurchaseIntent,
+    PURCHASE_INTENT_PATTERN,
     getDepositBasisFromContext,
     DEPOSIT_TYPE_WITH_CABINETRY,
     DEPOSIT_TYPE_WALLBED_ONLY,
