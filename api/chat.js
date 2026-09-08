@@ -876,10 +876,41 @@ const PURCHASE_INTENT_PATTERN = new RegExp([
     `\\b(?:i'?m|i\\s+am)\\s+ready\\s+to\\s+${PURCHASE_INTENT_BUY_VERB}\\b`
 ].join('|'), 'i');
 
+// A short affirmative reply ("yes", "sure", "ok let's do it"), anchored at the
+// start of the message.
+const AFFIRMATIVE_REPLY_PATTERN = /^\s*(?:yes|yeah|yep|yup|ya|sure|ok(?:ay)?|alright|absolutely|definitely|of\s+course|please|yes\s+please|go\s+ahead|let'?s\s+(?:do\s+it|go|proceed)|sounds?\s+good|i\s+do|i\s+would|correct|confirm(?:ed)?|proceed)\b/i;
+
+// The bot's own reservation invitation, e.g. "Would you like to reserve your
+// Murano King with a 10% deposit?".
+const RESERVATION_INVITE_PATTERN = /would\s+you\s+like\s+to\s+reserve|(?:reserve|reservation|secure)[\s\S]{0,140}?deposit|deposit[\s\S]{0,140}?(?:reserve|reservation)/i;
+
 function hasPurchaseIntent(message, history) {
     const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
     const turns = [...priorTurns, { role: 'user', content: message }];
-    return turns.some(t => t && t.role === 'user' && t.content && PURCHASE_INTENT_PATTERN.test(t.content));
+
+    for (let i = 0; i < turns.length; i++) {
+        const t = turns[i];
+        if (!t || t.role !== 'user' || !t.content) continue;
+
+        // Explicit purchase phrasing ("I want the Murano King", "I'll take it").
+        if (PURCHASE_INTENT_PATTERN.test(t.content)) return true;
+
+        // An affirmative reply to the bot's OWN reservation invitation is itself a
+        // clear buy signal: bot asks "Would you like to reserve ... deposit?", the
+        // customer says "Yes". Without this, the customer agreeing to the very
+        // offer the bot just made would not register as intent, so the deposit
+        // button would never appear (the reported bug). Gated on the preceding
+        // assistant turn actually being a reservation invite, so a bare "yes" in
+        // an unrelated context (e.g. "Yes, the Murano King" answering a model
+        // choice) does not falsely trigger it.
+        if (AFFIRMATIVE_REPLY_PATTERN.test(t.content)) {
+            const prev = turns[i - 1];
+            if (prev && prev.role === 'assistant' && prev.content && RESERVATION_INVITE_PATTERN.test(prev.content)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Builds a ready-made, already-correct breakdown to inject into the system

@@ -2102,3 +2102,28 @@ describe('cabinetry: dimension parsing handles both measurements in one message'
         assert.equal(dims('the wall bed is 5ft wide').totalWidthFt, null);
     });
 });
+describe('purchase intent: affirmative reply to a reservation invitation counts', () => {
+    const invite = 'Would you like to reserve your Murano King with a 10% deposit?';
+    const modelChoiceQ = 'Are you looking for a queen size, or would you prefer a Murano King?';
+
+    test('"Yes" after the bot invites a reservation is purchase intent', () => {
+        assert.equal(hasPurchaseIntent('Yes', [{ role: 'assistant', content: invite }]), true);
+    });
+    test('"Yes" with no preceding reservation invite is NOT purchase intent', () => {
+        assert.equal(hasPurchaseIntent('Yes', [{ role: 'assistant', content: 'We recommend the Murano Queen.' }]), false);
+    });
+    test('"Yes Murano King" answering a model-choice question is NOT purchase intent', () => {
+        assert.equal(hasPurchaseIntent('Yes Murano King', [{ role: 'assistant', content: modelChoiceQ }]), false);
+    });
+    test('affirming a reservation invite yields a wall-bed deposit offer', () => {
+        const history = [
+            { role: 'user', content: 'Yes Murano King' },
+            { role: 'assistant', content: 'The Murano King ... Sale: RM 15,285.45 ... ' + invite },
+            { role: 'user', content: 'Yes' }
+        ];
+        const offer = computeDepositOffer('Yes', history);
+        assert.ok(offer, 'expected a deposit offer');
+        assert.equal(offer.depositType, 'wallbed_only');
+        assert.equal(offer.wallBedModelLabel, 'Murano King');
+    });
+});
