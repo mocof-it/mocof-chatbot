@@ -2127,3 +2127,42 @@ describe('purchase intent: affirmative reply to a reservation invitation counts'
         assert.equal(offer.wallBedModelLabel, 'Murano King');
     });
 });
+
+describe('deposit: declining cabinetry unblocks the bed-only reservation', () => {
+    const declinedThenReserve = [
+        { role: 'user', content: 'Murano Queen' },
+        { role: 'assistant', content: 'Explore adding custom surround cabinetry, or reserve your Murano Queen with a 10% deposit?' },
+        { role: 'user', content: 'Yes' },
+        { role: 'assistant', content: 'Adding custom surround cabinetry — what is the wall height and width?' },
+        { role: 'user', content: "I don't want to add cabinets" },
+        { role: 'assistant', content: 'Got it, just the Murano Queen. Would you like to reserve it with a 10% deposit?' },
+        { role: 'user', content: 'yes I want to reserve' }
+    ];
+
+    test('declining cabinets then reserving yields a wall-bed-only offer', () => {
+        const offer = computeDepositOffer('yes I want to reserve', declinedThenReserve);
+        assert.ok(offer, 'expected a deposit offer after the customer declined cabinets and asked to reserve');
+        assert.equal(offer.depositType, 'wallbed_only');
+        assert.equal(offer.wallBedModelLabel, 'Murano Queen');
+    });
+
+    test('anti-downgrade still blocks a customer actively pricing cabinets (no decline)', () => {
+        const active = [
+            { role: 'user', content: 'how much for a murano queen with surround cabinets?' },
+            { role: 'assistant', content: 'What is your wall height?' },
+            { role: 'user', content: 'I want to reserve it' }
+        ];
+        assert.equal(computeDepositOffer('I want to reserve it', active), null);
+    });
+
+    test('re-engaging cabinetry after a decline re-arms the anti-downgrade guard', () => {
+        const reengage = [
+            { role: 'user', content: 'murano queen' },
+            { role: 'assistant', content: 'reserve or add cabinets?' },
+            { role: 'user', content: 'no cabinets' },
+            { role: 'assistant', content: 'ok' },
+            { role: 'user', content: 'actually add surround cabinets please' }
+        ];
+        assert.equal(computeDepositOffer('actually add surround cabinets please', reengage), null);
+    });
+});

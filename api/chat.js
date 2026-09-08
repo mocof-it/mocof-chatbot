@@ -1056,6 +1056,27 @@ function depositTypeLabel(depositType) {
 // keeps waiting for an explicit price question.
 //
 // Returns null when no deposit should be offered at all.
+// A customer opting OUT of cabinetry after it was raised. Note the phrases here
+// also contain the word "cabinet"/"surround", so they match CABINETRY_MENTION_PATTERN
+// too — which is exactly why the plain anti-downgrade guard misfired: "I don't want
+// to add cabinets" reads as cabinetry still being "on the table".
+const CABINETRY_DECLINE_PATTERN = /(?:\b(?:no|without|skip|drop|forget)\b[^.!?]{0,15}?(?:cabinet|surround))|(?:\b(?:don'?t|do\s*not|dont|not|won'?t|wont|rather\s+not|prefer\s+not)\b[^.!?]{0,20}?cabinet)|(?:\b(?:just|only)\s+(?:want\s+)?(?:the\s+)?(?:wall\s*)?bed\b)|no\s+cabinetry/i;
+
+// True when the customer's MOST RECENT cabinetry-related turn is a decline. Walking
+// newest-first means a later re-engagement ("actually, add the cabinets") correctly
+// flips this back to false and the anti-downgrade guard applies again.
+function hasDeclinedCabinetry(message, history) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    const turns = [...priorTurns, { role: 'user', content: message }];
+    for (let i = turns.length - 1; i >= 0; i--) {
+        const t = turns[i];
+        if (!t || t.role !== 'user' || !t.content) continue;
+        if (CABINETRY_DECLINE_PATTERN.test(t.content)) return true;
+        if (CABINETRY_MENTION_PATTERN.test(t.content)) return false;
+    }
+    return false;
+}
+
 function getDepositBasisFromContext(message, history) {
     // A wall bed that cannot physically be installed at this customer's ceiling
     // must never be taken payment for, on either path. This check was
@@ -1083,7 +1104,13 @@ function getDepositBasisFromContext(message, history) {
     // nothing. (Also covers a blocked wall-too-short estimate.) This is the
     // anti-downgrade guard: without it, broadening the trigger above would let
     // a mid-cabinetry customer be offered the cheaper bed-only deposit.
-    if (hasCabinetryIntent(message, history)) return null;
+    //
+    // BUT only while the customer still WANTS cabinetry. Once they decline it
+    // ("I don't want to add cabinets", "just the bed"), cabinetry is no longer on
+    // the table and the bed-only deposit must be allowed — otherwise a customer
+    // who opts out of cabinets can never reserve the plain wall bed, because the
+    // word "cabinet" lingering in the history keeps this guard firing forever.
+    if (hasCabinetryIntent(message, history) && !hasDeclinedCabinetry(message, history)) return null;
 
     const pricedModel = extractSelectedWallBedPricing(history, message);
     if (!pricedModel) return null;
