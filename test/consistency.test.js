@@ -1891,3 +1891,25 @@ describe('cabinetry: keeps asking when a measurement answer is unusable', () => 
         assert.equal(out, '');
     });
 });
+describe('cabinetry: dimension parsing handles both measurements in one message', () => {
+    const dims = (text) => extractCabinetryDimensions([{ role: 'user', content: text }], text);
+
+    // Regression: customer gives height AND width in one natural sentence.
+    // Previously the width silently failed to parse, leaving totalWidthFt null,
+    // which produced an empty price allow-list and forced the WhatsApp fallback.
+    test('"...height is 9ft and width is 12 ft" parses both', () => {
+        assert.deepEqual(dims('total height of the wall is 9ft and width is 12 ft'), { heightFt: 9, totalWidthFt: 12 });
+    });
+    test('"the wall is 9ft high and 12ft wide" parses both', () => {
+        assert.deepEqual(dims('the wall is 9ft high and 12ft wide'), { heightFt: 9, totalWidthFt: 12 });
+    });
+    test('"9ft height, 12ft width" does not mistake width for height', () => {
+        assert.deepEqual(dims('9ft height, 12ft width'), { heightFt: 9, totalWidthFt: 12 });
+    });
+    test('"width is 12 ft" alone parses the width', () => {
+        assert.equal(dims('width is 12 ft').totalWidthFt, 12);
+    });
+    test('bed width mention is NOT taken as wall width', () => {
+        assert.equal(dims('the wall bed is 5ft wide').totalWidthFt, null);
+    });
+});

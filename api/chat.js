@@ -505,8 +505,13 @@ const BARE_LENGTH_PATTERN = /(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|c
 // filler characters between "height" and "8.5ft", which the old rigid
 // single-word-gap regexes did not allow, so they silently failed to match.
 const HEIGHT_PATTERNS = [
-    /(?:wall\s*)?height[^\d]{0,30}?(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)/,
-    /(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)[^\d]{0,20}?(?:tall|high\b|in\s*height)/
+    // number-first: "9ft height", "9 ft tall", "9ft high", "9ft in height" — no
+    // digit allowed between the number and its label, so a following "12ft width"
+    // can't be swallowed as the height.
+    /(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)[^\d]{0,20}?(?:tall|high\b|in\s*height|height)/,
+    // label-first: "height is 9ft", "the height of the wall is 9ft" — tolerant of
+    // filler words but not of an intervening digit.
+    /(?:wall\s*)?height[^\d]{0,30}?(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)/
 ];
 // Strict form (contains the literal word "total") is always safe to check.
 const TOTAL_WIDTH_STRICT_PATTERNS = [
@@ -518,6 +523,13 @@ const TOTAL_WIDTH_STRICT_PATTERNS = [
 // and "the wall bed is 5.5ft wide" should not get miscounted as the total wall.
 const BED_WIDTH_MENTION_GUARD = /(?:wall\s*)?bed[^\d]{0,20}?(?:\d+(?:\.\d+)?)\s*(?:ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)\s*wide|(?:\d+(?:\.\d+)?)\s*(?:ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)[^\d]{0,15}?wide[^\d]{0,10}?(?:wall\s*)?bed/;
 const TOTAL_WIDTH_LOOSE_PATTERNS = [
+    // label-first, no "total" required and no digit in between: "width is 12 ft",
+    // "width: 12ft", "the width is 12 ft", "wall width 12ft".
+    /width[^\d]{0,20}?(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)/,
+    // number-first: "12ft width", "12 ft wide", "12ft wide" (standalone, no
+    // trailing "wall" required).
+    /(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)[^\d]{0,10}?(?:wide|width)/,
+    // original "wall is X wide" / "X wide wall" forms, kept for coverage.
     /wall[^\d]{0,15}?(?:is|of)[^\d]{0,10}?(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)\s*wide/,
     /(\d+(?:\.\d+)?)\s*(ft|feet|foot|'|cm|centimeters?|centimetres?|met(?:er|re)s?|m\b)[^\d]{0,10}?(?:wide|width)[^\d]{0,10}?wall\b/
 ];
