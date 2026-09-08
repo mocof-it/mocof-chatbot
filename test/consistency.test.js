@@ -2166,3 +2166,243 @@ describe('deposit: declining cabinetry unblocks the bed-only reservation', () =>
         assert.equal(computeDepositOffer('actually add surround cabinets please', reengage), null);
     });
 });
+
+// ── Deposit suppression diagnostics ────────────────────
+// These logs are how MOCOF finds out WHY a customer got no deposit button.
+// The tests pin two things: that the highest-signal case is distinguishable
+// from routine ones, and that logging changed no return value.
+describe('deposit suppression diagnostics', () => {
+
+    // Captures console output around one call without leaking the patch if
+    // the call throws.
+    function capture(message, history) {
+        const warns = [];
+        const errors = [];
+        const realWarn = console.warn;
+        const realError = console.error;
+        console.warn = (...a) => warns.push(a.join(' '));
+        console.error = (...a) => errors.push(a.join(' '));
+        let result;
+        try {
+            result = getDepositBasisFromContext(message, history);
+        } finally {
+            console.warn = realWarn;
+            console.error = realError;
+        }
+        return { result, warns, errors };
+    }
+
+    const PRICED = [
+        { role: 'user', content: 'Is there a Murano Single?' },
+        { role: 'assistant', content: 'Yes — the Murano Single is RM 16,083.40 retail | RM 12,062.55 sale.' }
+    ];
+
+    // Requirement: a conversation with no wall-bed context must not log. This
+    // gate is hit on every turn of every unrelated chat, so logging it would
+    // bury the lines that matter.
+    test('a conversation with no wall bed in it logs nothing', () => {
+        const { result, warns, errors } = capture('hi', []);
+        assert.equal(result, null);
+        assert.deepEqual(warns, []);
+        assert.deepEqual(errors, []);
+    });
+
+    test('a wall bed with no specific model resolved warns, without a model label', () => {
+        const { result, warns, errors } = capture('tell me about wall beds', [
+            { role: 'user', content: 'do you sell wall beds?' },
+            { role: 'assistant', content: 'Yes, we carry several wall bed ranges.' }
+        ]);
+        assert.equal(result, null);
+        assert.equal(errors.length, 0, 'routine suppression must not raise the severity');
+        assert.equal(warns.length, 1);
+        assert.match(warns[0], /^\[deposit\] suppressed: no specific wall bed model resolved$/);
+    });
+
+    test('a priced model without buy intent warns and names the model', () => {
+        const { result, warns, errors } = capture('Is there a Murano Single?', PRICED);
+        assert.equal(result, null);
+        assert.equal(errors.length, 0);
+        assert.equal(warns.length, 1);
+        assert.match(warns[0], /\[deposit\] suppressed: model resolved but no purchase-intent signal/);
+        assert.match(warns[0], /\| model: Murano Single/);
+    });
+
+    // The alarm. A customer who named a model AND said they want it, getting
+    // nothing, is the shape every deposit bug in this project has taken.
+    test('a ceiling conflict with buy intent raises the WITHHELD alarm', () => {
+        const { result, warns, errors } = capture('I want the Murano Queen', [
+            { role: 'user', content: 'My ceiling is 7ft, do you have a Murano Queen?' },
+            { role: 'assistant', content: 'What is your ceiling height?' },
+            { role: 'user', content: '7ft' },
+            { role: 'assistant', content: 'The Murano Queen is RM 14,371.55 sale.' }
+        ]);
+        assert.equal(result, null, 'behaviour must be unchanged — still no offer');
+        assert.equal(warns.length, 0, 'this case must NOT be a routine warn');
+        assert.equal(errors.length, 1);
+        assert.match(errors[0], /^\[deposit\] WITHHELD despite buy intent: ceiling conflict/);
+        assert.match(errors[0], /\| model: Murano Queen/);
+    });
+
+    test('cabinetry in progress with buy intent raises the WITHHELD alarm', () => {
+        const { result, warns, errors } = capture('I want to buy the Murano Queen', [
+            { role: 'user', content: 'Murano Queen with side cabinets please' },
+            { role: 'assistant', content: 'The Murano Queen is RM 14,371.55 sale. What is the wall height?' }
+        ]);
+        assert.equal(result, null);
+        assert.equal(warns.length, 0);
+        assert.equal(errors.length, 1);
+        assert.match(errors[0], /^\[deposit\] WITHHELD despite buy intent: cabinetry in progress/);
+    });
+
+    // A produced offer is not a suppression, so it must be silent on both
+    // channels — otherwise the logs report a problem that did not happen.
+    test('a successful offer logs nothing', () => {
+        const { result, warns, errors } = capture('I want the Murano Single', PRICED);
+        assert.ok(result, 'fixture must actually produce an offer');
+        assert.equal(result.type, DEPOSIT_TYPE_WALLBED_ONLY);
+        assert.deepEqual(warns, []);
+        assert.deepEqual(errors, []);
+    });
+
+    // Requirement 4: logging only. Every gate returns exactly what it did
+    // before, and the one success path still produces its offer.
+    test('logging changed no return value at any gate', () => {
+        assert.equal(capture('hi', []).result, null);
+        assert.equal(capture('Is there a Murano Single?', PRICED).result, null);
+        assert.ok(capture('I want the Murano Single', PRICED).result);
+    });
+});
+
+
+// ── Stuck measurement flow escalates to a human ─────────
+// "Keep asking" has its own dead end: a customer who cannot produce the
+// number in chat gets asked forever. Past a couple of failed attempts the
+// prompt must stop re-asking and offer a person instead.
+describe('cabinetry: escalates to a human when the measurement loop is stuck', () => {
+
+    const OPEN = { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' };
+
+    // The requirement is explicit that ONE failed ask is still just
+    // conversation — escalating here would pull customers out of a flow that
+    // was about to succeed on the retry.
+    test('a single failed ask keeps asking and does NOT escalate', () => {
+        const history = [
+            OPEN,
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' }
+        ];
+        const out = buildCabinetryEstimateBlock('not sure', history);
+        assert.match(out, /KEEP ASKING/);
+        assert.doesNotMatch(out, /HAND OFF TO A HUMAN/);
+        assert.doesNotMatch(out, /12-568 4568/);
+    });
+
+    test('after 2 failed asks it escalates to the WhatsApp handoff', () => {
+        const history = [
+            OPEN,
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: 'not sure' },
+            { role: 'assistant', content: 'No problem — what height is the wall, in feet?' }
+        ];
+        const out = buildCabinetryEstimateBlock('I really dont know', history);
+        assert.match(out, /STUCK, HAND OFF TO A HUMAN/);
+        assert.match(out, /\+60 12-568 4568/, 'must carry the product WhatsApp number');
+        assert.match(out, /STOP asking for it again/i);
+
+        // The two instructions contradict each other, so the escalation has to
+        // REPLACE the keep-asking block, not sit alongside it.
+        assert.doesNotMatch(out, /KEEP ASKING/,
+            'must not tell the model to keep asking and stop asking at once');
+    });
+
+    // Counted per dimension: a height answered first time must not be dragged
+    // into an escalation caused by the width.
+    test('escalates on the width alone when the height was answered fine', () => {
+        const history = [
+            OPEN,
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' },
+            { role: 'user', content: 'dunno' },
+            { role: 'assistant', content: 'Roughly what total width is the wall, in feet?' }
+        ];
+        const out = buildCabinetryEstimateBlock('no idea sorry', history);
+        assert.match(out, /STUCK, HAND OFF TO A HUMAN/);
+        assert.match(out, /total wall width/i);
+        assert.doesNotMatch(out, /wall height and/i, 'height was answered — do not claim to be stuck on it');
+    });
+
+    // An assistant turn that MENTIONS a dimension without asking for one is not
+    // an ask, or quoting a bed spec twice would trigger a handoff.
+    test('non-question mentions of height do not count as asks', () => {
+        const history = [
+            OPEN,
+            { role: 'assistant', content: 'The Murano Queen has a height of 209.5cm.' },
+            { role: 'user', content: 'ok' },
+            { role: 'assistant', content: 'Its height suits most ceilings.' }
+        ];
+        const out = buildCabinetryEstimateBlock('ok', history);
+        assert.doesNotMatch(out, /HAND OFF TO A HUMAN/);
+    });
+
+    // Only the BOT's asks count. A customer asking their own questions about
+    // height ("does height matter?") is not the bot failing to get an answer, and
+    // counting their turns would hand off a customer who was merely curious.
+    test('the customer\'s own height questions do not count as asks', () => {
+        const history = [
+            OPEN,
+            { role: 'user', content: 'does the height matter for this?' },
+            { role: 'assistant', content: 'It does — taller walls allow a full overhead cabinet.' },
+            { role: 'user', content: 'what height do most people have?' },
+            { role: 'assistant', content: 'Usually around 9 to 10 feet. What is the height of your wall, in feet?' }
+        ];
+        const out = buildCabinetryEstimateBlock('not sure', history);
+        assert.match(out, /KEEP ASKING/, 'only one real ask has been made');
+        assert.doesNotMatch(out, /HAND OFF TO A HUMAN/);
+    });
+
+    // Escalation must never become a way to state a price without measurements.
+    test('the escalation still forbids quoting a cabinetry price', () => {
+        const history = [
+            OPEN,
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: 'not sure' },
+            { role: 'assistant', content: 'What height is the wall, in feet?' }
+        ];
+        const out = buildCabinetryEstimateBlock('no clue', history);
+        assert.match(out, /do NOT state any cabinetry price/i);
+    });
+});
+
+
+// ── System prompt: human handoff (PART A) ───────────────
+describe('system prompt — when to hand off to a human', () => {
+    const prompt = buildSystemPrompt('Tell me about the Murano Queen', []);
+
+    test('has a dedicated handoff section with both numbers', () => {
+        assert.match(prompt, /WHEN TO HAND OFF TO A HUMAN:/);
+        assert.match(prompt, /\+60 12-568 4568 for products/);
+        assert.match(prompt, /\+60 12-475 4568 for renovation/);
+    });
+
+    test('names all four handoff triggers', () => {
+        assert.match(prompt, /confused or frustrated, or are repeating themselves/i);
+        assert.match(prompt, /failed to help with the SAME thing/i);
+        assert.match(prompt, /outside the catalog/i);
+        assert.match(prompt, /explicitly ask for a person/i);
+    });
+
+    // The tone requirement is the point of the section — a handoff that reads
+    // as a brush-off is worse than none.
+    test('frames the handoff as help arriving, and keeps answering meanwhile', () => {
+        assert.match(prompt, /never as a dead end/i);
+        assert.match(prompt, /Let me\s+connect you with a colleague/i);
+        assert.match(prompt, /Keep helping in the meantime/i);
+        assert.match(prompt, /never reply with only a phone number/i);
+    });
+
+    // The pre-existing rule bans the WhatsApp number outside renovation. Without
+    // an explicit carve-out the model gets two contradictory instructions.
+    test('carves the handoff out of the renovation-only WhatsApp restriction', () => {
+        assert.match(prompt, /The ONE exception is a genuine human handoff/i);
+    });
+});

@@ -137,7 +137,23 @@ WHATSAPP CONTACT:
 - For renovation inquiries: +60 12-475 4568
 - When customer mentions renovation budget or design preferences, use the renovation WhatsApp number (+60 12-475 4568).
 - ONLY append WhatsApp contact when the customer explicitly mentions their BUDGET or DESIGN PREFERENCES specifically in the context of renovation (e.g. "my budget is RM 50k", "I want a Scandinavian style", "how much would a full renovation cost", "what design do you suggest for my condo renovation").
-- Do NOT include the WhatsApp number or that message in any other responses — not for general product questions, showroom visits, warranty, delivery, pricing enquiries, or any other topic unless renovation budget or renovation design is the clear subject.
+- Do NOT include the WhatsApp number or that message in any other responses — not for general product questions, showroom visits, warranty, delivery, pricing enquiries, or any other topic unless renovation budget or renovation design is the clear subject. The ONE exception is a genuine human handoff, below.
+
+WHEN TO HAND OFF TO A HUMAN:
+- Offer to connect the customer with a colleague on WhatsApp whenever ANY of these is true:
+  1. They seem confused or frustrated, or are repeating themselves.
+  2. You have tried and failed to help with the SAME thing across a couple of turns.
+  3. Their request is outside the catalog or outside what you can do, or you are simply
+     not confident your answer is right.
+  4. They explicitly ask for a person.
+- Use +60 12-568 4568 for products, +60 12-475 4568 for renovation.
+- Frame it as help arriving, never as a dead end or a refusal. Something like: "Let me
+  connect you with a colleague who can help with this directly on **WhatsApp** at
+  +60 12-568 4568." Warm, one or two sentences, no apology spiral.
+- Keep helping in the meantime. Still answer whatever part of their question you CAN
+  answer, and offer the handoff alongside it — never reply with only a phone number.
+- Do not hand off on the first small stumble. One clarifying question is normal
+  conversation; it is the repeated failure or the visible frustration that matters.
 
 PRICING RULES:
 - You CAN share the listed retail and sale prices from the knowledge base
@@ -913,6 +929,40 @@ function hasPurchaseIntent(message, history) {
     return false;
 }
 
+// ── Stuck-measurement escalation ────────────────────────────────
+// The measurement flow asks for one dimension at a time and re-asks when a
+// reply can't be parsed. That is right up to a point: some customers simply
+// cannot produce the number in a chat window — not at home, no tape measure, or
+// they don't follow what's being asked — and for them "ask again" is an endless
+// loop with no exit. Past a couple of failed attempts the useful move is a human.
+//
+// Deliberately conservative. Escalating early would pull a customer out of a
+// flow that was about to succeed on the second try, so a single failed ask is
+// still just conversation; only a repeated one counts.
+const STUCK_MEASUREMENT_ASKS = 2;
+
+// Matched against the ASSISTANT's own turns — this counts how many times the bot
+// asked, not how many times the customer answered. The '?' requirement keeps a
+// turn that merely mentions a height (e.g. quoting a bed's dimensions back) from
+// being miscounted as an ask.
+//
+// Deliberately broader than the literal word the bare-number classifier in
+// extractCabinetryDimensions() keys on. When the model rephrases naturally —
+// "how tall is the wall?" instead of "what is the height?" — that classifier no
+// longer recognises the reply, so the dimension stays null however correctly the
+// customer answers. Counting only the literal wording would leave exactly those
+// conversations, the ones most in need of a human, unable to ever escalate.
+const HEIGHT_ASK_PATTERN = /height|how\s+tall|tall\s+is/i;
+const WIDTH_ASK_PATTERN = /width|how\s+wide|wide\s+is/i;
+
+function countMeasurementAsks(history, pattern) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    return priorTurns.filter(t =>
+        t && t.role === 'assistant' && typeof t.content === 'string'
+        && pattern.test(t.content) && t.content.includes('?')
+    ).length;
+}
+
 // Builds a ready-made, already-correct breakdown to inject into the system
 // prompt when we have enough measurements. The model is told to relay these
 // exact figures rather than compute them itself — this removes reliance on
@@ -942,6 +992,11 @@ function buildCabinetryEstimateBlock(message, history) {
     // leaves it null)? Tell the model to KEEP asking for it. Without this the
     // function returns '' here and injects no guidance, so a wrong/blank answer
     // silently ends the measurement flow and the deposit option never appears.
+    //
+    // "Keep asking" has a failure mode of its own, though: a customer who cannot
+    // give the number — they're not at home, they have no tape measure, they
+    // don't understand what's being asked — gets asked the same question forever.
+    // countMeasurementAsks() below is what breaks that loop.
     if (!est) {
         const { heightFt, totalWidthFt } = extractCabinetryDimensions(history, message);
         const selectedModel = extractSelectedWallBedModel(history, message);
@@ -952,6 +1007,28 @@ function buildCabinetryEstimateBlock(message, history) {
         if (totalWidthFt === null || totalWidthFt === undefined) missing.push('the TOTAL WALL WIDTH (in ft or m)');
 
         if (missing.length === 0) return '';
+
+        // Has the bot already asked for a measurement it still hasn't got? Counted
+        // per dimension, so being stuck on width doesn't escalate a height that
+        // was answered fine on the first ask.
+        const stuckOn = [];
+        if (!heightFt && countMeasurementAsks(history, HEIGHT_ASK_PATTERN) >= STUCK_MEASUREMENT_ASKS) {
+            stuckOn.push('the wall height');
+        }
+        if ((totalWidthFt === null || typeof totalWidthFt === 'undefined')
+            && countMeasurementAsks(history, WIDTH_ASK_PATTERN) >= STUCK_MEASUREMENT_ASKS) {
+            stuckOn.push('the total wall width');
+        }
+
+        // Replaces the keep-asking block rather than joining it — "stop asking"
+        // and "keep asking" in one prompt is a coin flip, and the whole point is
+        // that continuing to ask has already failed twice.
+        if (stuckOn.length > 0) {
+            return [
+                '',
+                `CABINETRY ESTIMATE — STUCK, HAND OFF TO A HUMAN: you have already asked this customer for ${stuckOn.join(' and ')} at least ${STUCK_MEASUREMENT_ASKS} times and still cannot read a usable number from their replies. STOP asking for it again — repeating the question is not working and will frustrate them. Instead, warmly offer to hand them over to a colleague who can take the measurements with them: acknowledge that measuring a wall over chat is fiddly, then offer **WhatsApp** at +60 12-568 4568 so someone can walk them through it or arrange a site visit. Keep it to one or two friendly sentences and do not apologise repeatedly. Answer anything else they asked as normal, and do NOT state any cabinetry price — you still do not have the measurements to compute one.`
+            ].join('\n');
+        }
 
         return [
             '',
@@ -1077,6 +1154,65 @@ function hasDeclinedCabinetry(message, history) {
     return false;
 }
 
+// ── Deposit suppression diagnostics ─────────────────────────────
+// getDepositBasisFromContext() declines to offer through four separate gates,
+// and every one of them used to be silent. When a customer couldn't get a
+// deposit button, nobody at MOCOF could see which rule stopped it — the price
+// guardrail already logs when it fires, and this closes the same gap for
+// deposits.
+//
+// Strictly observational: nothing below feeds a decision, and every lookup is
+// guarded, because a logging failure must never become a failed deposit.
+
+// Used only to keep the "no model resolved" branch quiet. That gate is hit on
+// literally every turn of every conversation that isn't about a wall bed — a
+// plain "hi" included — so logging it unconditionally would bury the branches
+// that actually mean something. Checked across BOTH roles, since the assistant
+// is usually the one to name a model.
+const WALLBED_MENTION_PATTERN = /wall\s*bed|wallbed|murphy\s*bed|murano|gioco/i;
+
+function hasWallBedContext(message, history) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    const turns = [...priorTurns, { role: 'user', content: message }];
+    return turns.some(t => t && t.content && WALLBED_MENTION_PATTERN.test(t.content));
+}
+
+// Best-effort context for a suppression line. Returns nulls rather than
+// throwing: extractSelectedWallBedPricing() is not reached at all on the
+// ceiling-conflict path today, so calling it purely to enrich a log must not
+// introduce a throw where none was previously possible.
+function describeDepositSuppression(message, history) {
+    try {
+        const priced = extractSelectedWallBedPricing(history, message);
+        return {
+            modelLabel: priced ? priced.label : null,
+            purchaseIntent: hasPurchaseIntent(message, history)
+        };
+    } catch {
+        return { modelLabel: null, purchaseIntent: false };
+    }
+}
+
+function logDepositSuppressed(reason, message, history) {
+    try {
+        const { modelLabel, purchaseIntent } = describeDepositSuppression(message, history);
+        const suffix = modelLabel ? ` | model: ${modelLabel}` : '';
+
+        // The one case worth raising the severity for: the customer named a
+        // specific model AND said they want it, and still got no button. That is
+        // the "should probably have offered and didn't" shape, which is what
+        // every deposit bug in this project has looked like so far.
+        if (modelLabel && purchaseIntent) {
+            console.error(`[deposit] WITHHELD despite buy intent: ${reason}${suffix}`);
+            return;
+        }
+
+        console.warn(`[deposit] suppressed: ${reason}${suffix}`);
+    } catch {
+        // Diagnostics must never break the deposit path.
+    }
+}
+
 function getDepositBasisFromContext(message, history) {
     // A wall bed that cannot physically be installed at this customer's ceiling
     // must never be taken payment for, on either path. This check was
@@ -1085,7 +1221,10 @@ function getDepositBasisFromContext(message, history) {
     // produced a priced estimate and an offered deposit for an uninstallable
     // bed. detectMuranoCeilingConflict() is the same constraint the system
     // prompt is told to enforce in conversation.
-    if (detectMuranoCeilingConflict(message, history)) return null;
+    if (detectMuranoCeilingConflict(message, history)) {
+        logDepositSuppressed('ceiling conflict (bed not installable at this ceiling)', message, history);
+        return null;
+    }
 
     if (hasPriceIntent(message, history)) {
         const est = getCabinetryEstimateFromContext(message, history);
@@ -1110,10 +1249,19 @@ function getDepositBasisFromContext(message, history) {
     // the table and the bed-only deposit must be allowed — otherwise a customer
     // who opts out of cabinets can never reserve the plain wall bed, because the
     // word "cabinet" lingering in the history keeps this guard firing forever.
-    if (hasCabinetryIntent(message, history) && !hasDeclinedCabinetry(message, history)) return null;
+    if (hasCabinetryIntent(message, history) && !hasDeclinedCabinetry(message, history)) {
+        logDepositSuppressed('cabinetry in progress, not yet priced (anti-downgrade)', message, history);
+        return null;
+    }
 
     const pricedModel = extractSelectedWallBedPricing(history, message);
-    if (!pricedModel) return null;
+    if (!pricedModel) {
+        // Quiet unless a wall bed genuinely came up — see hasWallBedContext().
+        if (hasWallBedContext(message, history)) {
+            logDepositSuppressed('no specific wall bed model resolved', message, history);
+        }
+        return null;
+    }
 
     // A priced model is not by itself a reason to ask for money. "Is there a
     // Murano Single?" resolves a specific model and its price, and used to be
@@ -1123,7 +1271,10 @@ function getDepositBasisFromContext(message, history) {
     // Only this path needs the check. The cabinetry path above already requires
     // an explicit price request PLUS the customer measuring their own wall over
     // several turns, which is a far stronger buy signal than any phrase match.
-    if (!hasPurchaseIntent(message, history)) return null;
+    if (!hasPurchaseIntent(message, history)) {
+        logDepositSuppressed('model resolved but no purchase-intent signal', message, history);
+        return null;
+    }
 
     return {
         type: DEPOSIT_TYPE_WALLBED_ONLY,
