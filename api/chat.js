@@ -1267,6 +1267,16 @@ function logDepositSuppressed(reason, message, history) {
     }
 }
 
+// True once the cabinetry estimate has actually been PRESENTED to the customer in
+// a prior assistant turn (the estimate breakdown always states a "grand total").
+// This is the precise form of the "deposit must never precede the price text"
+// invariant: the button is allowed only after the price is on screen, regardless
+// of whether the customer used a price keyword to get there.
+function cabinetryEstimatePresented(history) {
+    if (!Array.isArray(history)) return false;
+    return history.some(t => t && t.role === 'assistant' && t.content && /grand\s*total/i.test(t.content));
+}
+
 function getDepositBasisFromContext(message, history) {
     // A wall bed that cannot physically be installed at this customer's ceiling
     // must never be taken payment for, on either path. This check was
@@ -1280,7 +1290,15 @@ function getDepositBasisFromContext(message, history) {
         return null;
     }
 
-    if (hasPriceIntent(message, history)) {
+    // Offer the cabinetry deposit once a real estimate exists AND the price has
+    // actually been REVEALED — either the customer asked (hasPriceIntent) or a
+    // grand total was already presented in a prior turn. The second half is the
+    // fix: a customer who says "Murano Queen with cabinets", gives measurements,
+    // sees the estimate, then agrees with a bare "yes" never trips hasPriceIntent's
+    // keyword check, so the button was withheld even though the estimate was on
+    // screen. Gating on "estimate was presented" preserves the invariant that the
+    // button never PRECEDES the price text, without depending on phrasing.
+    if (hasPriceIntent(message, history) || cabinetryEstimatePresented(history)) {
         const est = getCabinetryEstimateFromContext(message, history);
         if (est && !est.blocked && est.grandTotal !== null && typeof est.grandTotal !== 'undefined') {
             return {

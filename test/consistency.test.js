@@ -2490,3 +2490,33 @@ describe('hasPriceIntent — agreeing to the bot\'s own estimate offer', () => {
         assert.match(out, /Murano Queen/);
     });
 });
+
+describe('deposit: cabinetry deposit follows the presented estimate, not a price keyword', () => {
+    // The reported bug: customer says "Murano Queen with cabinets", gives measurements,
+    // the estimate (grand total) is shown, then agrees with a bare "yes" — no price
+    // keyword anywhere, yet the button must appear because the price is on screen.
+    test('estimate already presented + agreement yields a with-cabinetry offer', () => {
+        const history = [
+            { role: 'user', content: 'Murano Queen with cabinets' },
+            { role: 'assistant', content: 'To help calculate the custom surround cabinetry estimate, what is the wall height and width?' },
+            { role: 'user', content: '15ft high and 7ft wide' },
+            { role: 'assistant', content: 'Here is the breakdown ... Grand Total: RM 22,373.55. Would you like to reserve your Murano Queen with a 10% deposit?' },
+            { role: 'user', content: 'yes' }
+        ];
+        const offer = computeDepositOffer('yes', history);
+        assert.ok(offer, 'expected a deposit offer once the estimate has been presented');
+        assert.equal(offer.depositType, DEPOSIT_TYPE_WITH_CABINETRY);
+        assert.equal(offer.wallBedModelLabel, 'Murano Queen');
+    });
+
+    // Guard the invariant from the other side: no estimate presented yet => no button.
+    test('no offer while still collecting measurements (estimate not yet shown)', () => {
+        const history = [
+            { role: 'user', content: 'Murano Queen with cabinets' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '15ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        assert.equal(computeDepositOffer('7ft', history), null);
+    });
+});
