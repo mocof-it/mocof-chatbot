@@ -801,7 +801,38 @@ const PRICE_INTENT_PATTERN = /\b(how\s*much|price|cost|estimate|quote|total)\b/i
 function hasPriceIntent(message, history) {
     const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
     const turns = [...priorTurns, { role: 'user', content: message }];
-    return turns.some(t => t && t.role === 'user' && t.content && PRICE_INTENT_PATTERN.test(t.content));
+
+    for (let i = 0; i < turns.length; i++) {
+        const t = turns[i];
+        if (!t || t.role !== 'user' || !t.content) continue;
+
+        // The customer's own price wording ("how much", "what's the total").
+        if (PRICE_INTENT_PATTERN.test(t.content)) return true;
+
+        // An affirmative reply to the bot's OWN offer to price something is a
+        // price request just as much as asking outright: the bot says "Would you
+        // like an estimate for adding surround cabinetry?" and the customer says
+        // "yes". Their turn contains no price keyword, so keyword-matching alone
+        // read that as no price intent — which suppressed the pre-calculated
+        // estimate block, left the model to work the figure out itself from the
+        // raw rates, and got the whole reply swapped for the WhatsApp fallback
+        // when the guardrail didn't recognise the number. The customer asked for
+        // an estimate and received a phone number.
+        //
+        // Gated on the PRECEDING assistant turn actually being an estimate offer,
+        // so a bare "yes" elsewhere (agreeing to a model, a showroom visit, a
+        // reservation) still does not count. Same shape as the reservation case
+        // in hasPurchaseIntent(), and it reuses that function's affirmative
+        // pattern rather than defining a second one.
+        if (AFFIRMATIVE_REPLY_PATTERN.test(t.content)) {
+            const prev = turns[i - 1];
+            if (prev && prev.role === 'assistant' && prev.content && ESTIMATE_OFFER_PATTERN.test(prev.content)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 // Kept as an alias. This gate was written for — and named after — the cabinetry
@@ -899,6 +930,29 @@ const AFFIRMATIVE_REPLY_PATTERN = /^\s*(?:yes|yeah|yep|yup|ya|sure|ok(?:ay)?|alr
 // The bot's own reservation invitation, e.g. "Would you like to reserve your
 // Murano King with a 10% deposit?".
 const RESERVATION_INVITE_PATTERN = /would\s+you\s+like\s+to\s+reserve|(?:reserve|reservation|secure)[\s\S]{0,140}?deposit|deposit[\s\S]{0,140}?(?:reserve|reservation)/i;
+
+// The bot's own offer to PRICE something, e.g. "Would you like an estimate for
+// adding surround cabinetry?". The sibling of RESERVATION_INVITE_PATTERN above:
+// that one turns a "yes" into buy intent, this one turns a "yes" into price
+// intent. Kept deliberately narrow — it must not match the reservation invite,
+// a model choice, or a showroom offer, because anything it matches turns a bare
+// "yes" on the next turn into a price request.
+const ESTIMATE_OFFER_PATTERN = new RegExp([
+    // "would you like an estimate", "do you want a quote"
+    '(?:would|do)\\s+you\\s+(?:like|want)[\\s\\S]{0,40}?\\b(?:estimate|quote|quotation)\\b',
+    // "shall I calculate", "should I work out", "can I quote"
+    '(?:shall|should|can)\\s+i\\s+(?:calculate|work\\s+out|price|quote|estimate)\\b',
+    // "let me calculate", "I can calculate that for you", "happy to price it"
+    '(?:let\\s+me|i\\s+can|i\\s+could|happy\\s+to)\\s+(?:calculate|work\\s+out|price|quote|estimate)\\b',
+    // "get you a quote", "give you an estimate"
+    '(?:get|give)\\s+you\\s+(?:a|an)\\s+(?:estimate|quote|quotation|price)\\b',
+    // "put together an estimate", "prepare a quote"
+    '(?:put\\s+together|prepare|work\\s+out)\\s+(?:a|an|the)?\\s*(?:estimate|quote|quotation)\\b',
+    // "calculate an estimate", "calculate the total"
+    'calculate\\s+(?:a|an|the)?\\s*(?:estimate|quote|price|total|cost)\\b',
+    // "an estimate for adding surround cabinetry"
+    '\\b(?:estimate|quote)\\s+for\\b[\\s\\S]{0,60}?(?:cabinet|surround|wall\\s*bed)'
+].join('|'), 'i');
 
 function hasPurchaseIntent(message, history) {
     const priorTurns = Array.isArray(history) ? history.slice(-10) : [];

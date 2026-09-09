@@ -2406,3 +2406,87 @@ describe('system prompt — when to hand off to a human', () => {
         assert.match(prompt, /The ONE exception is a genuine human handoff/i);
     });
 });
+
+
+// ── Price intent from agreeing to the bot's offer ───────
+// The bug: the bot offers "Would you like an estimate for adding surround
+// cabinetry?", the customer says "yes", and because their turn carries no
+// price keyword, hasPriceIntent said false. That suppressed the
+// pre-calculated estimate block, left the model to derive the figure from raw
+// rates, and the guardrail then swapped the whole reply for the WhatsApp
+// fallback — the customer asked for an estimate and got a phone number.
+describe('hasPriceIntent — agreeing to the bot\'s own estimate offer', () => {
+
+    test('"yes" after an estimate offer counts as price intent', () => {
+        const history = [
+            { role: 'user', content: 'I want a Murano Queen with surround cabinets' },
+            { role: 'assistant', content: 'Would you like an estimate for adding surround cabinetry?' }
+        ];
+        assert.equal(hasPriceIntent('yes', history), true);
+    });
+
+    test('other affirmative phrasings work the same way', () => {
+        const history = [
+            { role: 'assistant', content: 'Shall I calculate the cabinetry for you?' }
+        ];
+        for (const reply of ['yes', 'yes please', 'sure', 'ok', 'go ahead', 'sounds good']) {
+            assert.equal(hasPriceIntent(reply, history), true, 'should accept: ' + reply);
+        }
+    });
+
+    // The gate that keeps this from firing everywhere. Without the preceding-turn
+    // check, any "yes" in any context would silently become a price request.
+    test('a bare "yes" with no estimate offer before it is NOT price intent', () => {
+        assert.equal(hasPriceIntent('yes', []), false);
+        assert.equal(hasPriceIntent('yes', [
+            { role: 'assistant', content: 'Yes — the Murano Queen is one of our vertical wall beds.' }
+        ]), false);
+        assert.equal(hasPriceIntent('yes', [
+            { role: 'assistant', content: 'Would you like to see our showroom?' }
+        ]), false);
+    });
+
+    // The reservation invite has its own affirmative path in hasPurchaseIntent.
+    // These two must not bleed into each other: agreeing to reserve is a buy
+    // signal, not a request to be quoted something new.
+    test('"yes" to a RESERVATION invite is not price intent', () => {
+        assert.equal(hasPriceIntent('yes', [
+            { role: 'assistant', content: 'Would you like to reserve your Murano Queen with a 10% deposit?' }
+        ]), false);
+    });
+
+    test('an ordinary price question still counts, unchanged', () => {
+        assert.equal(hasPriceIntent('how much for cabinets?', []), true);
+        assert.equal(hasPriceIntent('what is the total?', []), true);
+        assert.equal(hasPriceIntent('can I get a quote?', []), true);
+        assert.equal(hasPriceIntent('do you deliver?', []), false);
+    });
+
+    // hasCabinetryPriceIntent is an alias of the same implementation, so the fix
+    // must reach it too — the deposit path reads it under that name.
+    test('the hasCabinetryPriceIntent alias inherits the fix', () => {
+        const history = [
+            { role: 'assistant', content: 'Would you like an estimate for adding surround cabinetry?' }
+        ];
+        assert.equal(hasCabinetryPriceIntent('yes', history), true);
+    });
+
+    // End to end: the whole point of the fix. Same conversation that used to
+    // produce an empty block and therefore the WhatsApp fallback.
+    test('the full estimate block is produced after agreeing with "yes"', () => {
+        const history = [
+            { role: 'user', content: 'I want a Murano Queen' },
+            { role: 'assistant', content: 'The Murano Queen is RM 14,371.55 sale. Would you like an estimate for adding surround cabinetry?' },
+            { role: 'user', content: 'yes' },
+            { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
+            { role: 'user', content: '11ft' },
+            { role: 'assistant', content: 'And the total width of the wall, in feet?' }
+        ];
+        const out = buildCabinetryEstimateBlock('10ft', history);
+
+        assert.notEqual(out, '', 'the estimate block must no longer be suppressed');
+        assert.match(out, /GRAND TOTAL/);
+        assert.match(out, /PRE-CALCULATED WALL BED \+ CABINETRY ESTIMATE/);
+        assert.match(out, /Murano Queen/);
+    });
+});
