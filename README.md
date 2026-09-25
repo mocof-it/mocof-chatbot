@@ -13,6 +13,7 @@ This project combines:
 - curated product and showroom knowledge in `knowledge/`
 - a pricing guardrail that prevents unsupported RM values from reaching customers
 - Stripe Checkout for deposits tied to a quote reference and confirmable webhook handling
+- a separate, passcode-gated staff tool at `/staff` that turns a described order into a real Stripe invoice
 - automated tests plus CI syntax/import validation
 
 The chatbot uses Gemini through Google's OpenAI-compatible chat completions endpoint and keeps manual pricing logic in JavaScript instead of trusting the model to do arithmetic.
@@ -93,6 +94,7 @@ curl -X POST http://localhost:3000/api/chat \
 - `lib/staffAuth.js` — staff session tokens (HMAC-SHA256, no DB), passcode comparison, and the `requireStaffAuth()` gate
 - `lib/invoiceInput.js` — validates staff-confirmed invoice input before Stripe is touched, and parses the model's proposal
 - `lib/productNames.js` — canonical product names derived from `knowledge/*.js`, and the conservative normalizer that tidies invoice line-item descriptions (never overrides what staff typed when it is unsure)
+- `lib/productPricing.js` — resolves an invoice line item's **sale** price from the knowledge base in code, so an invoice figure never originates from the model; returns `null` for anything it cannot pin to exactly one product
 - `lib/gemini.js` — the Gemini caller, shared by the customer bot and the staff tool
 - `public/deposit-success.html` — success page shown after successful Stripe checkout
 - `test/consistency.test.js` — regression checks for critical pricing and gating logic
@@ -260,17 +262,34 @@ Notifications depend on the Stripe webhook being live: the email is composed ins
 
 A separate, staff-only page at `/staff` that turns a plain-English order description into a real Stripe invoice with a payable link to send the customer. It shares no code path with the customer chatbot.
 
+In normal use a staff member supplies three things — customer name, customer email, and what the customer is buying. **They do not type prices for catalog products**; the server fills those in.
+
 1. Staff enter the shared passcode (`STAFF_TOOL_PASSCODE`) and get an 8-hour session cookie.
-2. They describe the order in chat. `POST /api/staff-chat` asks Gemini to turn it into structured fields and **returns a proposal only** — this endpoint never contacts Stripe. If something essential is missing, the model replies with one clarifying question instead.
-3. The proposal appears as an editable form: customer name, email, and a row per line item. Every figure can be corrected, lines added or removed.
-4. **Confirm & Create Invoice** posts the edited fields to `POST /api/staff-create-invoice`, which re-validates them server-side, creates the Stripe customer and invoice, finalizes it, and returns the hosted payment link to copy.
+2. They describe the order in chat. `POST /api/staff-chat` asks Gemini to turn it into structured fields and **returns a proposal only** — this endpoint never contacts Stripe. The model is asked for product *names*, never for a figure. If the customer's email is missing, or it genuinely cannot tell what is being sold, it replies with one clarifying question instead.
+3. Still on the server, `lib/productPricing.js` looks each line item up in the knowledge base and fills in the catalog **sale** price, replacing the description with the canonical product name (`murano q` → `Murano Queen`, RM 14,371.55). Anything it cannot price confidently is left blank for the staff member to type in.
+4. The proposal appears as an editable form: customer name, email, and a row per line item. Auto-filled amounts are marked *"Catalog price — editable"*, and that marker disappears as soon as the field is typed over. Every figure can be corrected, lines added or removed.
+5. **Confirm & Create Invoice** posts the edited fields to `POST /api/staff-create-invoice`, which re-validates them server-side, creates the Stripe customer and invoice, finalizes it, and returns the hosted payment link to copy.
+
+### Where the prices come from
+
+Catalog prices are resolved from the same structured tables the customer bot prices against, so the invoice and the chat quote cannot disagree:
+
+- `WALLBED_MODEL_PRICING` in `knowledge/wallbeds.js` — all 10 Murano and Gioco models.
+- `BASIC_SOFA_PRICING` in `knowledge/basicfurniture.js` — the 20 priced MOCOF Basic sofas. The prose in that file stays the source of truth, and a consistency test asserts every figure in the table still matches it.
+
+The **sale** price is always used, because sale prices are what the bot quotes everywhere else — an invoice quoting retail would contradict a price the customer had already been given.
+
+Some things have no single catalog price and deliberately fall through to manual entry: custom carpentry, delivery, site-survey and balance-payment lines; bedsheets (sold as ranges); and surround cabinetry (computed from wall measurements, not looked up). These arrive with an empty amount rather than a guess.
 
 ### Why it is safe to let a model near invoicing
 
+- **The model is never asked for a price.** It returns product names; `lib/productPricing.js` resolves the figure from the knowledge base in code. Any amount the model volunteers anyway is discarded rather than reviewed — a plausible invented figure is the one error a reviewer is least likely to catch, so the safest design is one where the model never produces a number at all. The catalog it is given in the prompt is a list of names only — a test asserts that reference carries no price figure.
 - **The model proposes; a human confirms; the server decides.** `/api/staff-chat` cannot create anything. `/api/staff-create-invoice` accepts structured fields only — never free text, and never anything forwarded straight from the model.
+- **Name matching refuses to guess.** A description that matches no catalog product, or more than one, resolves to "no price" rather than a best effort — so an unrecognised custom line keeps the words the staff member chose instead of borrowing another product's price.
 - **Validation is server-side regardless of the form.** `validateInvoiceInput()` rejects a missing email, an empty line-item list, and any amount that is not a finite number above zero. There is a RM 100,000 ceiling per line and in total as a fat-finger guard; raising it is a code change, not a runtime option.
-- **The model is told never to invent a price.** A missing amount comes back as `null` with a clarifying question, because a plausible invented figure is the one error a reviewer might not catch.
 - **Every staff route checks the session first**, before any Gemini or Stripe call, so an unauthenticated request costs nothing and reveals nothing.
+
+Note what is deliberately *not* enforced: the catalog price is a **default, not a rule**. Staff are a trusted role and may type over any filled-in figure — for a discount, a bundle, or a price the catalog has not caught up with — and whatever they confirm is what gets invoiced. The RM 100,000 ceiling remains the only backstop.
 
 ### Security boundary
 
