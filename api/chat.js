@@ -630,6 +630,81 @@ function buildMuranoCeilingWarningBlock(message, history) {
     ].join('\n');
 }
 
+// ── Side-cabinet count (corner installations) ───────────────
+// calculateCabinetPrice() prices TWO side cabinets unless told otherwise, and
+// for a long time nothing here ever told it otherwise — so a bed in a corner,
+// or up against another fixture, was quoted for a cabinet that physically
+// cannot be built. knowledge/cabinetry.js already instructs the bot to ask
+// "are both sides open or only one?" when it suspects a corner, which means
+// the customer's ANSWER to that question is as much a signal as an unprompted
+// "it's going in the corner" — both are handled below.
+//
+// Deliberately asymmetric: this returns 1 only on a clear statement and falls
+// back to 2 for anything ambiguous. Wrongly dropping to 1 under-quotes a real
+// build, which MOCOF either absorbs or has to re-quote awkwardly; staying at 2
+// is the long-standing behaviour and the customer corrects it in the next turn.
+
+// What the bot's own "corner?" question looks like, so a bare "one" / "both"
+// answer can be read against it — the same trick extractCabinetryDimensions()
+// uses to decide what a bare "9ft" refers to.
+const SIDES_QUESTION_PATTERN = /both sides|one side|corner|only one/;
+
+const ONE_SIDE_PATTERNS = [
+    // The negative lookahead keeps a catalog product ("Axil Corner Bookshelf",
+    // knowledge/basicfurniture.js) from reading as a corner install. That
+    // false positive would halve the side-cabinet cost on an ordinary build.
+    /\bcorner\b(?!\s*(?:bookshelf|shelf|shelves))/,
+    /\bone\s+side\b/,   // "only one side", "one side is against the wall", "one side open"
+    /\bonly\s+one\b/,   // "only one cabinet"
+    /\bjust\s+one\b/,
+    /\bone\s+cabinet\b/,
+    /\bonly\s+on\s+the\s+(?:left|right)\b/,
+    /\b(?:left|right)\s+(?:side\s+)?only\b/
+];
+
+// Trusted ONLY as a direct answer to the question above. A bare "two" in
+// ordinary prose is nearly always a measurement ("two metres of wall"), so it
+// earns its meaning from the question that preceded it and nowhere else.
+const ANSWER_TWO_SIDES_PATTERN = /\bboth\b|\btwo\b|^\s*2\s*$/;
+
+// "both sides", unlike a bare "two", is unambiguous enough to also clear an
+// earlier one-side reading in free prose — a customer who says "actually both
+// sides are open" has corrected themselves.
+const BOTH_SIDES_PATTERN = /\bboth\s+sides?\b|\bboth\s+are\s+open\b/;
+
+function detectSideCabinetCount(message, history) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    const turns = [...priorTurns, { role: 'user', content: message }];
+
+    let sides = 2; // never dropped to 1 on a weak signal
+
+    for (let i = 0; i < turns.length; i++) {
+        const turn = turns[i];
+        // Only the customer's own words carry the signal. The bot asking "is it
+        // a corner?" — or echoing "one side" back while confirming — must never
+        // be read as the answer, which is why non-user turns are skipped here
+        // exactly as extractCabinetryDimensions() skips them.
+        if (!turn || turn.role !== 'user' || !turn.content) continue;
+
+        const userText = (turn.content || '').toLowerCase();
+        const prevAssistant = (i > 0 && turns[i - 1] && turns[i - 1].role === 'assistant')
+            ? (turns[i - 1].content || '').toLowerCase()
+            : '';
+
+        // Last clear signal wins, so a customer can correct an earlier answer.
+        if (SIDES_QUESTION_PATTERN.test(prevAssistant)) {
+            if (ANSWER_TWO_SIDES_PATTERN.test(userText)) sides = 2;
+            else if (ONE_SIDE_PATTERNS.some(p => p.test(userText)) || /\bone\b/.test(userText)) sides = 1;
+            continue;
+        }
+
+        if (BOTH_SIDES_PATTERN.test(userText)) sides = 2;
+        else if (ONE_SIDE_PATTERNS.some(p => p.test(userText))) sides = 1;
+    }
+
+    return sides;
+}
+
 // Runs extraction + the real formula once; both the guard-allowlist and the
 // system-prompt pre-calculated block (below) read from this single source
 // so they can never disagree with each other.
@@ -661,11 +736,24 @@ function getCabinetryEstimateFromContext(message, history) {
         return { blocked: true, reason: 'WALL_TOO_SHORT_FOR_CABINETRY', heightFt, minHeightFt: sideCabinetHeightFt };
     }
 
+    // This call used to omit `sides` entirely, so every quote defaulted to 2
+    // and a corner install was over-charged for a cabinet that can't be built.
+    //
+    // NOTE: `sides` scales the COUNT only. The leftover width is still split in
+    // two ((total − bed) / 2) whatever the count, so one side is priced at half
+    // the side-cabinet cost — which is the over-quoting this fixes. Whether a
+    // TRUE corner should instead put the FULL leftover width on the single open
+    // side (a wider cabinet at the same total cost) is an open business
+    // question for MOCOF: that would be a change to the width model, not the
+    // count, and is deliberately NOT made here.
+    const sides = detectSideCabinetCount(message, history);
+
     try {
         const result = calculateCabinetPrice({
             wallHeightFt: heightFt,
             wallBedWidthFt: selectedModel.widthFt,
             totalWallWidthFt: totalWidthFt ?? undefined,
+            sides,
             sideCabinetHeightFt
         });
 
@@ -1678,6 +1766,7 @@ export {
     extractCabinetryDimensions,
     extractSelectedWallBedModel,
     extractSelectedWallBedPricing,
+    detectSideCabinetCount,
     getCabinetryEstimateFromContext,
     computeCabinetryAllowedAmounts,
     buildCabinetryEstimateBlock,

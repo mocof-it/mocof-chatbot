@@ -20,6 +20,7 @@ import {
     getRelevantKnowledge,
     buildSystemPrompt,
     extractCabinetryDimensions,
+    detectSideCabinetCount,
     getCabinetryEstimateFromContext,
     computeCabinetryAllowedAmounts,
     buildCabinetryEstimateBlock,
@@ -3031,5 +3032,152 @@ describe('product reservation deposits', () => {
         assert.equal(subject, 'New Deposit — Wall Bed Only (Murano Queen)');
         assert.match(text, /Wall bed model: Murano Queen/);
         assert.match(text, /Grand total: RM 14371\.55/);
+    });
+});
+
+// =============================================================
+// Corner installations — the side-cabinet COUNT must reach the formula.
+//
+// This is a documented past incident: calculateCabinetPrice() has always
+// accepted `sides`, and knowledge/cabinetry.js has always told the bot to use
+// sides = 1 for a corner, but the api/chat.js call site quietly stopped passing
+// it, so every quote silently defaulted to 2. Nothing failed when that
+// happened, which is exactly why the money assertions below exist: they pin
+// that changing the count actually changes what the customer is quoted.
+// =============================================================
+describe('cabinetry: corner installs price one side cabinet, not two', () => {
+    // Assistant phrasing matters — extractCabinetryDimensions() reads the
+    // preceding bot turn to interpret a bare "9ft", and keys on "height".
+    const measured = [
+        { role: 'user', content: 'I want a Murano Queen with surround cabinets' },
+        { role: 'assistant', content: 'What is the height of your wall?' },
+        { role: 'user', content: '9ft' },
+        { role: 'assistant', content: 'And the total wall width?' },
+        { role: 'user', content: '12ft' }
+    ];
+    const asked = [...measured, { role: 'assistant', content: 'Are both sides open or only one?' }];
+
+    describe('detectSideCabinetCount', () => {
+        const sides = (msg, history = []) => detectSideCabinetCount(msg, history);
+        const AFTER_QUESTION = [{ role: 'assistant', content: 'Are both sides open or only one?' }];
+
+        test('defaults to 2 with no signal at all', () => {
+            assert.equal(sides('My wall is 9ft high and 12ft wide'), 2);
+            assert.equal(sides('how much for a Murano Queen with cabinets?'), 2);
+        });
+
+        test('reads an unprompted corner or one-side statement as 1', () => {
+            for (const text of [
+                'it sits in the corner of the room',
+                'the bed is in a corner',
+                'one side is against the wall',
+                'only one side is open',
+                'I only want one cabinet',
+                'just one cabinet please',
+                'cabinets only on the left',
+                'right side only'
+            ]) {
+                assert.equal(sides(text), 1, `expected 1 side for: ${text}`);
+            }
+        });
+
+        test('reads the answer to the bot own both-sides-or-one question', () => {
+            for (const [reply, expected] of [
+                ['one', 1], ['just one', 1], ['only one', 1], ['one side', 1],
+                ['left only', 1], ['right only', 1],
+                ['both', 2], ['both sides', 2], ['two', 2], ['2', 2]
+            ]) {
+                assert.equal(sides(reply, AFTER_QUESTION), expected, `reply "${reply}"`);
+            }
+        });
+
+        test('an unrelated reply to that question does not drop to 1', () => {
+            // A measurement, or a plain "no", carries no side information —
+            // staying at 2 is the safe reading.
+            assert.equal(sides('12ft', AFTER_QUESTION), 2);
+            assert.equal(sides('no, it is on an open wall', [
+                { role: 'assistant', content: 'Is it going into a corner?' }
+            ]), 2);
+        });
+
+        test('only the customer words count — the bot saying "corner" is not a signal', () => {
+            // Otherwise the bot explaining what a corner install means would
+            // re-price the quote all by itself.
+            assert.equal(sides('what is the total then?', [
+                { role: 'assistant', content: 'A corner install only needs one side cabinet, so it costs less.' },
+                { role: 'user', content: 'ok' }
+            ]), 2);
+        });
+
+        test('a later correction wins over an earlier one', () => {
+            assert.equal(sides('actually both sides are open', [
+                { role: 'user', content: 'it is in a corner' }
+            ]), 2);
+        });
+
+        test('a catalog product named "Corner" is not a corner install', () => {
+            // "Axil Corner Bookshelf" lives in knowledge/basicfurniture.js.
+            assert.equal(sides('do you have the Axil Corner Bookshelf?'), 2);
+        });
+
+        test('"two" in ordinary prose is a measurement, not a side count', () => {
+            // Only trusted as a direct answer to the sides question, which is
+            // why this must not flip anything on its own.
+            assert.equal(sides('there is two metres of wall left over'), 2);
+        });
+    });
+
+    describe('the count reaches the formula and the money moves', () => {
+        const twoSides = getCabinetryEstimateFromContext('how much would that cost?', measured);
+        const oneSide = getCabinetryEstimateFromContext('only one side', asked);
+
+        test('both conversations actually produce an estimate', () => {
+            // Guards the fixtures themselves: a null here would make every
+            // assertion below vacuous rather than failing loudly.
+            assert.ok(twoSides && !twoSides.blocked, 'two-side fixture produced no estimate');
+            assert.ok(oneSide && !oneSide.blocked, 'corner fixture produced no estimate');
+        });
+
+        test('a normal conversation still prices two sides', () => {
+            assert.equal(twoSides.sides, 2);
+            assert.equal(twoSides.sideCostTotal, twoSides.sideCostPerSide * 2);
+        });
+
+        test('a corner conversation prices exactly one side', () => {
+            assert.equal(oneSide.sides, 1);
+            assert.equal(oneSide.sideCostTotal, oneSide.sideCostPerSide,
+                'one side must cost one side, not two');
+        });
+
+        test('the corner grand total is genuinely lower', () => {
+            // The whole point of the bug: a corner customer was over-quoted.
+            assert.ok(oneSide.grandTotal < twoSides.grandTotal);
+            assert.equal(
+                Math.round((twoSides.grandTotal - oneSide.grandTotal) * 100) / 100,
+                twoSides.sideCostPerSide,
+                'the saving is exactly one side cabinet'
+            );
+        });
+
+        test('the leftover-width geometry is deliberately unchanged', () => {
+            // Documented decision: `sides` scales the COUNT only. Whether a true
+            // corner should instead put the FULL leftover width on the one open
+            // side is an open business question with MOCOF — if that is ever
+            // answered "yes", this is the assertion that should fail and force
+            // the change to be deliberate.
+            assert.equal(oneSide.sideCabinetWidthFt, twoSides.sideCabinetWidthFt);
+            assert.equal(oneSide.sideCostPerSide, twoSides.sideCostPerSide);
+            assert.equal(oneSide.topCost, twoSides.topCost, 'the overhead cabinet is priced by wall width');
+        });
+
+        test('the price guardrail allows the corner total it just computed', () => {
+            // Without this the bot would state the correct corner price and the
+            // guardrail would flag it as hallucinated, replacing a right answer
+            // with the WhatsApp fallback.
+            const allowed = computeCabinetryAllowedAmounts('only one side', asked);
+            assert.ok(allowed.includes(oneSide.grandTotal), 'corner grand total must be allow-listed');
+            assert.ok(allowed.includes(oneSide.total));
+            assert.ok(allowed.includes(oneSide.sideCostTotal));
+        });
     });
 });
