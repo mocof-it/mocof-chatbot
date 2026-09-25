@@ -1,3 +1,40 @@
+// Structured price lookup for the Basic sofas, in the same shape as
+// WALLBED_MODEL_PRICING in knowledge/wallbeds.js and for the same reason: the
+// staff invoice tool resolves a line item's price in CODE from this table, so
+// the number on an invoice can never be something a language model produced.
+// The prose below stays the source of truth — a consistency test asserts every
+// figure here still matches it, because these are two copies of one fact.
+//
+// Only the sofas are tabulated. The rest of the MOCOF Basic catalog is quoted
+// in prose as ranges and "N models, RM X – RM Y" summaries, which have no single
+// price to resolve; those lines fall through to manual entry, which is correct.
+//
+// Each pattern is \b-anchored on the model's distinctive word so a bare
+// "lumina" resolves, while "Nebulatte" (a Basic coffee table further down the
+// prose) cannot be read as "Nebula Sofa" — the trailing \b stops it.
+export const BASIC_SOFA_PRICING = [
+    { pattern: /\btheta\b/i,    label: 'Theta Sofa',    retail: 3699.00,  sale: 2589.30 },
+    { pattern: /\bzenith\b/i,   label: 'Zenith Sofa',   retail: 4499.00,  sale: 3149.30 },
+    { pattern: /\bcrorix\b/i,   label: 'Crorix Sofa',   retail: 6399.00,  sale: 4479.30 },
+    { pattern: /\bflare\b/i,    label: 'Flare Sofa',    retail: 7599.00,  sale: 5319.30 },
+    { pattern: /\bdream\b/i,    label: 'Dream Sofa',    retail: 8299.00,  sale: 5809.30 },
+    { pattern: /\bdrion\b/i,    label: 'Drion Sofa',    retail: 9599.00,  sale: 6719.30 },
+    { pattern: /\bcelestia\b/i, label: 'Celestia Sofa', retail: 9799.00,  sale: 6859.30 },
+    { pattern: /\bcolony\b/i,   label: 'Colony Sofa',   retail: 9999.00,  sale: 6999.30 },
+    { pattern: /\blumina\b/i,   label: 'Lumina Sofa',   retail: 10099.00, sale: 7069.30 },
+    { pattern: /\bzenon\b/i,    label: 'Zenon Sofa',    retail: 12499.00, sale: 8749.30 },
+    { pattern: /\bmarlie\b/i,   label: 'Marlie Sofa',   retail: 12499.00, sale: 8749.30 },
+    { pattern: /\bnebula\b/i,   label: 'Nebula Sofa',   retail: 14499.00, sale: 10149.30 },
+    { pattern: /\bneva\b/i,     label: 'Neva Sofa',     retail: 14599.00, sale: 10219.30 },
+    { pattern: /\bperch\b/i,    label: 'Perch Sofa',    retail: 14999.00, sale: 10499.30 },
+    { pattern: /\borbit\b/i,    label: 'Orbit Sofa',    retail: 16099.00, sale: 11269.30 },
+    { pattern: /\bsolaris\b/i,  label: 'Solaris Sofa',  retail: 16299.00, sale: 11409.30 },
+    { pattern: /\bcasa\b/i,     label: 'Casa Sofa',     retail: 16699.00, sale: 11689.30 },
+    { pattern: /\bpluto\b/i,    label: 'Pluto Sofa',    retail: 18799.00, sale: 13159.30 },
+    { pattern: /\bmoria\b/i,    label: 'Moria Sofa',    retail: 19599.00, sale: 13719.30 },
+    { pattern: /\bcozelle\b/i,  label: 'Cozelle Sofa',  retail: 23899.00, sale: 16729.30 }
+];
+
 export function getBasicFurnitureKnowledge() {
     return `
 MOCOF BASIC — STANDALONE READY-MADE FURNITURE (separate from wall beds / SPAZE products, no custom carpentry, standard delivery):

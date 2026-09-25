@@ -18,16 +18,26 @@ import { requireStaffAuth } from '../lib/staffAuth.js';
 import { getGeminiApiKeys, callGeminiWithFallback, GEMINI_MODEL } from '../lib/gemini.js';
 import { parseProposedInvoice } from '../lib/invoiceInput.js';
 import { buildProductNameReference } from '../lib/productNames.js';
+import { applyCatalogPricing } from '../lib/productPricing.js';
 
 const MAX_HISTORY_TURNS = 12;
 
 // Note what this prompt does NOT contain: any MOCOF PRICING or persona. It
 // does carry the catalog's product NAMES, so the model can tidy "murano q"
 // into "Murano Queen" rather than inventing a house style — but names only,
-// never an amount beside them. The staff member supplies every figure, and the
-// model is explicitly told not to invent one, because a plausible-looking
-// invented amount is the one failure here that a human reviewer might not
-// catch. Handing it a price list is exactly what would undermine that.
+// never an amount beside them.
+//
+// Figures are not the model's job at all: after it returns names, the SERVER
+// looks each one up in the knowledge base and fills in the catalog sale price
+// (lib/productPricing.js). So the model is never asked for a number, and any
+// number it volunteers anyway is discarded rather than reviewed. That is
+// deliberate — a plausible-looking invented amount is the one failure a human
+// reviewer is least likely to catch, and handing the model a price list to
+// match against would have re-created exactly that risk.
+//
+// Products the catalog cannot price — custom work, delivery, site surveys,
+// bedsheets (sold as ranges), cabinetry (computed from measurements) — come
+// back with a null amount and the staff member types the figure in.
 const PRODUCT_NAME_REFERENCE = buildProductNameReference();
 
 const STAFF_SYSTEM_PROMPT = `You help MOCOF staff draft an invoice from a plain-English description of an order.
@@ -37,16 +47,17 @@ Respond with STRICT JSON ONLY. No prose, no explanation, no markdown code fences
 {
   "customerName": string,
   "customerEmail": string or null,
-  "lineItems": [ { "description": string, "amount": number } ],
+  "lineItems": [ { "description": string, "amount": null } ],
   "currency": "myr",
   "clarifyingQuestion": string or null
 }
 
 Rules:
-- "amount" is a plain number in Malaysian Ringgit (RM). No currency symbols, no commas, no thousands separators. 1500 — not "RM 1,500".
-- NEVER invent or estimate a price. Only use amounts the staff member actually stated. If an amount is missing, leave that line item's "amount" as null and ask for it in "clarifyingQuestion".
-- If something essential is missing (no customer email, no amount, no idea what is being sold), set "clarifyingQuestion" to one short, specific question and still fill in whatever you did understand. Leave the rest partial — do not guess.
-- When you have everything you need, set "clarifyingQuestion" to null.
+- PRICING IS NOT YOUR JOB. Do not invent, estimate, look up, or infer a price, and never ask the staff member for one. Set every line item's "amount" to null. The system fills in catalog prices itself after you reply, and a staff member types in anything it cannot price. An amount you supply will be discarded.
+- Because pricing is handled for you, NEVER put a question about price, amount, or cost in "clarifyingQuestion". A line item with no price is normal and complete as far as you are concerned.
+- Ask a clarifying question ONLY when the customer's email address is missing, or when you genuinely cannot tell what product or service is being sold. Nothing else is worth interrupting for.
+- If something essential is missing, set "clarifyingQuestion" to one short, specific question and still fill in whatever you did understand. Leave the rest partial — do not guess.
+- When you have the customer's details and can tell what is being sold, set "clarifyingQuestion" to null.
 - Split the order into one line item per distinct product or service.
 - Keep descriptions short and factual, as they will appear on a customer's invoice.
 - Where a line item clearly refers to one of the MOCOF products listed below, write that product's name EXACTLY as it appears in the list ("murano q" and "Murano Queen WB" both become "Murano Queen"; "gioco single desk" becomes "Gioco Single Desk").
@@ -107,12 +118,22 @@ export default async function handler(req, res) {
         console.warn('[staff] could not parse the model reply as an invoice proposal');
         return res.status(200).json({
             proposal: null,
-            clarifyingQuestion: "Sorry — I couldn't read that as an order. Could you rephrase it, including the customer's name, email, and the amount for each item?"
+            clarifyingQuestion: "Sorry — I couldn't read that as an order. Could you rephrase it, including the customer's name, email, and what they're buying?"
         });
     }
 
+    // The prices are decided HERE, in code, from the knowledge base — not by
+    // anything the model returned. A catalog product gets its sale price and
+    // canonical name; anything the catalog cannot price keeps a null amount for
+    // the staff member to fill in on the review card. Either way the figure
+    // stays editable there, and whatever they confirm is what gets invoiced.
+    const pricedProposal = {
+        ...proposal,
+        lineItems: applyCatalogPricing(proposal.lineItems)
+    };
+
     return res.status(200).json({
-        proposal,
-        clarifyingQuestion: proposal.clarifyingQuestion
+        proposal: pricedProposal,
+        clarifyingQuestion: pricedProposal.clarifyingQuestion
     });
 }

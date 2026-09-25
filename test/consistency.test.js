@@ -68,7 +68,9 @@ import { getWardrobeKnowledge } from '../knowledge/wardrobes.js';
 import { getShowroomKnowledge } from '../knowledge/showroom.js';
 import { getWarrantyKnowledge } from '../knowledge/warranty.js';
 import { getRenovationKnowledge } from '../knowledge/renovation.js';
-import { getBasicFurnitureKnowledge } from '../knowledge/basicfurniture.js';
+import { getBasicFurnitureKnowledge, BASIC_SOFA_PRICING } from '../knowledge/basicfurniture.js';
+import { resolveProductPrice, applyCatalogPricing } from '../lib/productPricing.js';
+import { validateInvoiceInput } from '../lib/invoiceInput.js';
 import { getBedsheetKnowledge } from '../knowledge/bedsheets.js';
 import { PRODUCT_IMAGES, getRelevantImages } from '../knowledge/productImages.js';
 import { logDepositToSheet, base64url, normalizePrivateKey, getAccessToken } from '../lib/sheetsLogger.js';
@@ -3178,6 +3180,161 @@ describe('cabinetry: corner installs price one side cabinet, not two', () => {
             assert.ok(allowed.includes(oneSide.grandTotal), 'corner grand total must be allow-listed');
             assert.ok(allowed.includes(oneSide.total));
             assert.ok(allowed.includes(oneSide.sideCostTotal));
+        });
+    });
+});
+
+// =============================================================
+// Staff invoice tool — catalog price resolution.
+//
+// The money-safety rule for this repo is that prices come from code, never from
+// the model. The staff tool now leans on that directly: the model returns only
+// product NAMES, and lib/productPricing.js resolves the figure. Two things
+// therefore need pinning — that the lookup is right, and that it refuses to
+// guess, because a wrong price here goes straight onto a customer's invoice.
+//
+// The BASIC_SOFA_PRICING block below is a drift guard in the same spirit as the
+// wall-bed table checks above: that array and the prose in
+// getBasicFurnitureKnowledge() are two copies of one fact, and the prose is the
+// source of truth.
+// =============================================================
+describe('staff invoice tool: catalog pricing', () => {
+    describe('BASIC_SOFA_PRICING matches the knowledge prose', () => {
+        const prose = getBasicFurnitureKnowledge();
+
+        test('every tabulated sofa appears in the prose with the same two figures', () => {
+            for (const sofa of BASIC_SOFA_PRICING) {
+                // Prose shape: "* Theta Sofa — RM 3,699.00 (retail) | RM 2,589.30 (sale)"
+                const line = prose.split('\n').find(l => l.includes(`* ${sofa.label} —`));
+                assert.ok(line, `${sofa.label} is tabulated but missing from the prose`);
+
+                const figures = [...line.matchAll(/RM\s*([\d,]+\.\d{2})/g)]
+                    .map(m => Number(m[1].replace(/,/g, '')));
+                assert.ok(figures.length >= 2, `${sofa.label}: expected retail and sale in "${line}"`);
+                assert.equal(figures[0], sofa.retail, `${sofa.label} retail drifted from the prose`);
+                assert.equal(figures[1], sofa.sale, `${sofa.label} sale drifted from the prose`);
+            }
+        });
+
+        test('no priced sofa in the prose was left out of the table', () => {
+            // Otherwise a sofa staff can sell silently falls back to manual
+            // entry, which looks like the tool simply not knowing the product.
+            const prosed = [...prose.matchAll(/^\* (\w[\w ]*?Sofa) — RM/gm)].map(m => m[1]);
+            const tabulated = new Set(BASIC_SOFA_PRICING.map(s => s.label));
+            for (const label of prosed) {
+                assert.ok(tabulated.has(label), `${label} is priced in the prose but not in BASIC_SOFA_PRICING`);
+            }
+            assert.equal(BASIC_SOFA_PRICING.length, prosed.length);
+        });
+
+        test('sale is below retail for every entry', () => {
+            for (const sofa of BASIC_SOFA_PRICING) {
+                assert.ok(sofa.sale > 0 && sofa.sale < sofa.retail, `${sofa.label}: sale must be below retail`);
+            }
+        });
+    });
+
+    describe('resolveProductPrice', () => {
+        test('resolves a wall bed, including staff shorthand', () => {
+            assert.deepEqual(resolveProductPrice('murano q'), { label: 'Murano Queen', salePrice: 14371.55 });
+            assert.deepEqual(resolveProductPrice('Murano Queen'), { label: 'Murano Queen', salePrice: 14371.55 });
+            assert.equal(resolveProductPrice('gioco single desk').salePrice, 17538.11);
+            // The negative lookaheads in WALLBED_MODEL_PRICING are what keep
+            // these three apart — a bare "Murano Queen" must not win here.
+            assert.equal(resolveProductPrice('murano queen sofa').label, 'Murano Queen Sofa');
+            assert.equal(resolveProductPrice('gioco single').label, 'Gioco Single');
+        });
+
+        test('resolves a Basic sofa from its bare model name', () => {
+            assert.deepEqual(resolveProductPrice('lumina'), { label: 'Lumina Sofa', salePrice: 7069.30 });
+            assert.equal(resolveProductPrice('theta sofa').salePrice, 2589.30);
+            assert.equal(resolveProductPrice('Cozelle Sofa').salePrice, 16729.30);
+        });
+
+        test('always returns the SALE price, never retail', () => {
+            // An invoice quoting retail would contradict the price the customer
+            // was already given in chat, where sale prices are what get quoted.
+            for (const model of WALLBED_MODEL_PRICING) {
+                assert.equal(resolveProductPrice(model.label).salePrice, model.sale);
+            }
+            for (const sofa of BASIC_SOFA_PRICING) {
+                assert.equal(resolveProductPrice(sofa.label).salePrice, sofa.sale);
+            }
+        });
+
+        test('returns null for anything the catalog cannot price', () => {
+            for (const name of [
+                'delivery charge', 'custom cabinetry job', 'site survey fee',
+                'balance payment', 'bedsheets', 'sofa', '', '   '
+            ]) {
+                assert.equal(resolveProductPrice(name), null, `expected null for "${name}"`);
+            }
+        });
+
+        test('never throws on a non-string', () => {
+            for (const bad of [null, undefined, 42, {}, [], true]) {
+                assert.equal(resolveProductPrice(bad), null);
+            }
+        });
+
+        test('a near-miss product name does not borrow another product\'s price', () => {
+            // "Nebulatte" is a Basic coffee table; "Nebula Sofa" is a sofa. The
+            // \b anchor is the only thing keeping them apart.
+            assert.equal(resolveProductPrice('nebulatte'), null);
+            assert.equal(resolveProductPrice('Nebula Sofa').label, 'Nebula Sofa');
+            assert.equal(resolveProductPrice('Axil Corner Bookshelf'), null);
+        });
+    });
+
+    describe('applyCatalogPricing', () => {
+        test('fills the sale price and canonical label, overriding the model', () => {
+            // The model is told not to send an amount; if it sends one anyway it
+            // must not survive next to a real catalog figure.
+            const [line] = applyCatalogPricing([{ description: 'murano q', amount: 99 }]);
+            assert.equal(line.description, 'Murano Queen');
+            assert.equal(line.amount, 14371.55);
+            assert.equal(line.pricedFromCatalog, true);
+        });
+
+        test('leaves a custom line untouched for manual entry', () => {
+            const [line] = applyCatalogPricing([{ description: 'custom cabinetry job', amount: null }]);
+            assert.equal(line.description, 'custom cabinetry job');
+            assert.equal(line.amount, null, 'staff must type this one in');
+            assert.equal(line.pricedFromCatalog, undefined, 'an unpriced line is not flagged as catalog-priced');
+        });
+
+        test('handles a mixed invoice one line at a time', () => {
+            const priced = applyCatalogPricing([
+                { description: 'murano q', amount: null },
+                { description: 'lumina', amount: null },
+                { description: 'delivery charge', amount: null }
+            ]);
+            assert.deepEqual(priced.map(l => l.amount), [14371.55, 7069.30, null]);
+            assert.deepEqual(priced.map(l => l.description), ['Murano Queen', 'Lumina Sofa', 'delivery charge']);
+        });
+
+        test('survives junk without throwing', () => {
+            assert.deepEqual(applyCatalogPricing([]), []);
+            assert.equal(applyCatalogPricing(null), null);
+            const rows = applyCatalogPricing([null, 'nope', { description: 'murano q', amount: null }]);
+            assert.equal(rows[0], null);
+            assert.equal(rows[1], 'nope');
+            assert.equal(rows[2].amount, 14371.55);
+        });
+
+        test('what it produces still passes validateInvoiceInput', () => {
+            // The whole point is that this feeds the existing review card and
+            // the unchanged create-invoice contract. The extra display flag
+            // must not trip the validator.
+            const result = validateInvoiceInput({
+                customerName: 'Ahmad',
+                customerEmail: 'ahmad@example.com',
+                currency: 'myr',
+                lineItems: applyCatalogPricing([{ description: 'murano q', amount: null }])
+            });
+            assert.equal(result.ok, true, result.ok ? '' : result.error);
+            assert.equal(result.value.lineItems[0].description, 'Murano Queen');
+            assert.equal(result.value.lineItems[0].amountCents, 1437155);
         });
     });
 });

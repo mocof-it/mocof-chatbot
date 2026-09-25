@@ -42,6 +42,10 @@
   .row input.desc { flex: 1; }
   .row input.amt { width: 130px; }
   .lineitem { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  /* Sits under its line item rather than inside it, so the row's flex layout
+     is untouched. Hidden the moment the staff member types over the amount —
+     at that point the figure is theirs, not the catalog's. */
+  .catalog-hint { color: #0a7d3f; font-size: 11px; margin: -4px 0 8px 2px; }
   .total { text-align: right; font-weight: 700; font-size: 15px; margin: 12px 0; }
   .hidden { display: none; }
   .linkbox { display: flex; gap: 8px; margin-top: 10px; }
@@ -224,7 +228,14 @@ function renderDraft(proposal) {
   el('custName').value = proposal.customerName || '';
   el('custEmail').value = proposal.customerEmail || '';
   items = (proposal.lineItems || []).map(function (row) {
-    return { description: row.description || '', amount: (row.amount === null || row.amount === undefined) ? '' : String(row.amount) };
+    // pricedFromCatalog is set by the server (lib/productPricing.js) when it
+    // resolved this line's price from the knowledge base. Display only — it is
+    // never sent back, so the create-invoice contract is unchanged.
+    return {
+      description: row.description || '',
+      amount: (row.amount === null || row.amount === undefined) ? '' : String(row.amount),
+      fromCatalog: row.pricedFromCatalog === true
+    };
   });
   if (items.length === 0) items.push({ description: '', amount: '' });
   renderItems();
@@ -247,13 +258,28 @@ function renderItems() {
     desc.value = item.description;
     desc.addEventListener('input', function () { items[index].description = desc.value; });
 
+    var hint = null;
+    if (item.fromCatalog) {
+      hint = document.createElement('div');
+      hint.className = 'catalog-hint';
+      hint.textContent = 'Catalog price — editable';
+    }
+
     var amt = document.createElement('input');
     amt.type = 'text';
     amt.inputMode = 'decimal';
     amt.className = 'amt';
     amt.placeholder = 'RM amount';
     amt.value = item.amount;
-    amt.addEventListener('input', function () { items[index].amount = amt.value; renderTotal(); });
+    amt.addEventListener('input', function () {
+      items[index].amount = amt.value;
+      // Once it has been typed over it is no longer the catalog's figure.
+      // Hidden in place rather than via renderItems(), which would rebuild the
+      // row and drop focus mid-keystroke.
+      items[index].fromCatalog = false;
+      if (hint) hint.style.display = 'none';
+      renderTotal();
+    });
 
     var del = document.createElement('button');
     del.type = 'button';
@@ -270,6 +296,7 @@ function renderItems() {
     row.appendChild(amt);
     row.appendChild(del);
     box.appendChild(row);
+    if (hint) box.appendChild(hint);
   });
   renderTotal();
 }
