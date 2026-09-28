@@ -1,5 +1,13 @@
 // =============================================================
 // FILE: api/staff-chat.js
+//
+// DEPRECATED — UNUSED AS OF THE STRUCTURED-FORM CHANGE. public/staff.html now
+// collects the customer and each product in explicit fields and prices them via
+// /api/staff-resolve-price, so there is no free text left to parse and nothing
+// calls this endpoint any more. It is kept, still authenticated, only so the
+// switch can be reverted without rebuilding it; expect it to be deleted in a
+// later cleanup. Do not build anything new on it.
+//
 // Turns a staff member's plain-English order description into a PROPOSED
 // invoice for them to review. Endpoint: POST /api/staff-chat
 // Body: { message, history }   Env vars: GEMINI_API_KEY (+ _2), STAFF_*

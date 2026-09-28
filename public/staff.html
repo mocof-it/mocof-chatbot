@@ -34,10 +34,6 @@
   .err { color: #b00020; font-size: 13px; margin-top: 10px; }
   .ok { color: #0a7d3f; font-size: 13px; margin-top: 10px; }
   .muted { color: #777777; font-size: 12px; }
-  .log { margin-bottom: 16px; }
-  .bubble { padding: 10px 14px; border-radius: 14px; margin-bottom: 8px; max-width: 85%; white-space: pre-wrap; }
-  .bubble.me { background: #000000; color: #ffffff; margin-left: auto; border-bottom-right-radius: 4px; }
-  .bubble.bot { background: #f0f0f0; color: #222222; border-bottom-left-radius: 4px; }
   .row { display: flex; gap: 8px; align-items: flex-start; }
   .row input.desc { flex: 1; }
   .row input.amt { width: 130px; }
@@ -46,6 +42,14 @@
      is untouched. Hidden the moment the staff member types over the amount —
      at that point the figure is theirs, not the catalog's. */
   .catalog-hint { color: #0a7d3f; font-size: 11px; margin: -4px 0 8px 2px; }
+  /* Restates every line as plain text under the inputs. The inputs alone are
+     easy to skim past; this is the bit a staff member actually reads back
+     before pressing a button that charges a customer. */
+  .summary { background: #fafafa; border: 1px solid #eeeeee; border-radius: 10px; padding: 10px 12px; margin-top: 16px; }
+  .summary-line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 2px 0; }
+  .summary-line .name { color: #222222; }
+  .summary-line .value { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .summary-line .value.missing { color: #b00020; }
   .total { text-align: right; font-weight: 700; font-size: 15px; margin: 12px 0; }
   .hidden { display: none; }
   .linkbox { display: flex; gap: 8px; margin-top: 10px; }
@@ -70,37 +74,28 @@
 
   <!-- ── Tool ─────────────────────────────────────────────── -->
   <div id="toolCard" class="hidden">
-    <div class="card">
-      <h1>Describe the order</h1>
-      <p class="sub">Plain English is fine — give the customer's name and email, and say what they're buying. Catalog prices are filled in for you; only state an amount for custom or one-off items.</p>
-      <div class="log" id="log"></div>
-      <form id="chatForm" autocomplete="off">
-        <textarea id="chatInput" placeholder="e.g. Invoice Aisyah at aisyah@example.com for a Murano Queen and a Lumina sofa, plus delivery at RM 300"></textarea>
-        <div style="margin-top:10px;"><button type="submit" id="sendBtn">Send</button></div>
-        <div class="err hidden" id="chatErr"></div>
+    <div class="card" id="draftCard">
+      <h1>New invoice</h1>
+      <p class="sub">Enter the customer's details and each product. Catalogue prices fill in on their own and stay editable — check every figure before you create the invoice.</p>
+      <div class="warn">Nothing has been created yet. Stripe is only contacted when you press <strong>Create Invoice</strong>, which immediately sends the customer a payable link.</div>
+
+      <form id="invoiceForm" autocomplete="off">
+        <label for="custName">Customer name</label>
+        <input type="text" id="custName" required>
+
+        <label for="custEmail">Customer email</label>
+        <input type="email" id="custEmail" required>
+
+        <label>Products</label>
+        <div id="items"></div>
+        <button type="button" class="ghost" id="addItem">+ Add product</button>
+
+        <div class="summary hidden" id="summary"></div>
+        <div class="total" id="total"></div>
+
+        <div style="margin-top:14px;"><button type="submit" id="confirmBtn">Create Invoice</button></div>
+        <div class="err hidden" id="draftErr"></div>
       </form>
-    </div>
-
-    <!-- Proposed invoice — editable before anything is created -->
-    <div class="card hidden" id="draftCard">
-      <h1>Review the invoice</h1>
-      <p class="sub">Check every figure. Creating the invoice is real and immediately sends a payable link.</p>
-      <div class="warn">Nothing has been created yet. Stripe is only contacted when you press <strong>Confirm &amp; Create Invoice</strong>.</div>
-
-      <label for="custName">Customer name</label>
-      <input type="text" id="custName">
-
-      <label for="custEmail">Customer email</label>
-      <input type="email" id="custEmail">
-
-      <label>Line items</label>
-      <div id="items"></div>
-      <button type="button" class="ghost" id="addItem">+ Add line item</button>
-
-      <div class="total" id="total"></div>
-
-      <button type="button" id="confirmBtn">Confirm &amp; Create Invoice</button>
-      <div class="err hidden" id="draftErr"></div>
     </div>
 
     <!-- Result -->
@@ -122,12 +117,24 @@
 <script>
 /* Staff invoice tool.
    Same-origin fetches only, and every server value is written with
-   textContent / .value — never innerHTML. Some of it originates from a
-   language model, and model output rendered as markup is an XSS hole. */
+   textContent / .value — never innerHTML.
+
+   The input is an explicit form, not a chat box: the staff member types a
+   customer and a product name per row, and the catalogue price is fetched from
+   /api/staff-resolve-price. Nothing here knows any price of its own — the
+   browser holds no copy of the catalogue, so a figure on screen either came
+   from that endpoint or was typed by the person looking at it. */
 
 var el = function (id) { return document.getElementById(id); };
-var history_ = [];   // {role, content} turns for /api/staff-chat
-var items = [];      // {description, amount} rows currently on screen
+
+/* One entry per product row.
+     name        what is in the Product Name box (the invoice description)
+     amount      what is in the Price box, as a string
+     fromCatalog true while `amount` is still the price the server filled in
+     seq         guards against a slow lookup landing after a newer one — see
+                 resolveRow() */
+var items = [];
+var rowSeq = 0;
 
 function show(node, visible) { node.classList.toggle('hidden', !visible); }
 
@@ -142,7 +149,6 @@ function handleUnauthorized() {
   show(el('toolCard'), false);
   show(el('loginCard'), true);
   setError(el('loginErr'), 'Your session expired. Please sign in again.');
-  history_ = [];
 }
 
 async function postJson(url, body) {
@@ -168,7 +174,7 @@ el('loginForm').addEventListener('submit', async function (e) {
       el('passcode').value = '';
       show(el('loginCard'), false);
       show(el('toolCard'), true);
-      el('chatInput').focus();
+      startNewInvoice();
     } else {
       setError(el('loginErr'), r.data.error || 'Sign in failed.');
     }
@@ -179,69 +185,20 @@ el('loginForm').addEventListener('submit', async function (e) {
   }
 });
 
-/* ── Chat ────────────────────────────────────────────────── */
-function addBubble(text, who) {
-  var b = document.createElement('div');
-  b.className = 'bubble ' + who;
-  b.textContent = text;
-  el('log').appendChild(b);
-  b.scrollIntoView({ block: 'nearest' });
+/* ── Product rows ────────────────────────────────────────── */
+function blankRow() {
+  return { name: '', amount: '', fromCatalog: false, seq: 0 };
 }
 
-el('chatForm').addEventListener('submit', async function (e) {
-  e.preventDefault();
-  var message = el('chatInput').value.trim();
-  if (!message) return;
-
-  setError(el('chatErr'), '');
-  addBubble(message, 'me');
-  el('chatInput').value = '';
-  el('sendBtn').disabled = true;
-
-  try {
-    var r = await postJson('/api/staff-chat', { message: message, history: history_ });
-    if (r.status === 401) { handleUnauthorized(); return; }
-    if (!r.ok) { setError(el('chatErr'), r.data.error || 'Something went wrong.'); return; }
-
-    history_.push({ role: 'user', content: message });
-
-    var proposal = r.data.proposal;
-    var question = r.data.clarifyingQuestion;
-
-    if (question) {
-      addBubble(question, 'bot');
-      history_.push({ role: 'assistant', content: question });
-    }
-    /* A proposal can arrive alongside a question — partial fields the staff
-       member can start correcting while they answer it. */
-    if (proposal) renderDraft(proposal);
-    if (!question && !proposal) addBubble('No invoice details could be read from that.', 'bot');
-  } catch (err) {
-    setError(el('chatErr'), 'Could not reach the server.');
-  } finally {
-    el('sendBtn').disabled = false;
-  }
-});
-
-/* ── Editable draft ──────────────────────────────────────── */
-function renderDraft(proposal) {
-  el('custName').value = proposal.customerName || '';
-  el('custEmail').value = proposal.customerEmail || '';
-  items = (proposal.lineItems || []).map(function (row) {
-    // pricedFromCatalog is set by the server (lib/productPricing.js) when it
-    // resolved this line's price from the knowledge base. Display only — it is
-    // never sent back, so the create-invoice contract is unchanged.
-    return {
-      description: row.description || '',
-      amount: (row.amount === null || row.amount === undefined) ? '' : String(row.amount),
-      fromCatalog: row.pricedFromCatalog === true
-    };
-  });
-  if (items.length === 0) items.push({ description: '', amount: '' });
+function startNewInvoice() {
+  el('custName').value = '';
+  el('custEmail').value = '';
+  items = [blankRow()];
   renderItems();
   show(el('draftCard'), true);
   show(el('doneCard'), false);
   setError(el('draftErr'), '');
+  el('custName').focus();
 }
 
 function renderItems() {
@@ -251,54 +208,97 @@ function renderItems() {
     var row = document.createElement('div');
     row.className = 'lineitem';
 
-    var desc = document.createElement('input');
-    desc.type = 'text';
-    desc.className = 'desc';
-    desc.placeholder = 'Description';
-    desc.value = item.description;
-    desc.addEventListener('input', function () { items[index].description = desc.value; });
-
-    var hint = null;
-    if (item.fromCatalog) {
-      hint = document.createElement('div');
-      hint.className = 'catalog-hint';
-      hint.textContent = 'Catalog price — editable';
-    }
+    var name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'desc';
+    name.placeholder = 'Product name';
+    name.value = item.name;
+    name.addEventListener('input', function () { items[index].name = name.value; renderSummary(); });
 
     var amt = document.createElement('input');
-    amt.type = 'text';
-    amt.inputMode = 'decimal';
+    amt.type = 'number';
+    amt.step = '0.01';
+    amt.min = '0';
     amt.className = 'amt';
-    amt.placeholder = 'RM amount';
+    amt.placeholder = 'RM';
     amt.value = item.amount;
+
+    var hint = document.createElement('div');
+    hint.className = 'catalog-hint';
+    hint.textContent = 'Catalogue price — editable';
+    show(hint, item.fromCatalog);
+
+    /* Look the price up when they leave the field. `change` fires on blur only
+       if the value actually changed, which is exactly the trigger we want — a
+       staff member tabbing back through an untouched row should not set off a
+       fresh lookup. */
+    name.addEventListener('change', function () {
+      items[index].name = name.value;
+      resolveRow(index, name, amt, hint);
+    });
+
     amt.addEventListener('input', function () {
       items[index].amount = amt.value;
-      // Once it has been typed over it is no longer the catalog's figure.
-      // Hidden in place rather than via renderItems(), which would rebuild the
-      // row and drop focus mid-keystroke.
+      // Once typed over, the figure is theirs, not the catalogue's. Hidden in
+      // place rather than by re-rendering, which would drop focus mid-keystroke.
       items[index].fromCatalog = false;
-      if (hint) hint.style.display = 'none';
-      renderTotal();
+      show(hint, false);
+      renderSummary();
     });
 
     var del = document.createElement('button');
     del.type = 'button';
     del.className = 'ghost';
     del.textContent = '×';
-    del.title = 'Remove line item';
+    del.title = 'Remove this product';
     del.addEventListener('click', function () {
       items.splice(index, 1);
-      if (items.length === 0) items.push({ description: '', amount: '' });
+      if (items.length === 0) items.push(blankRow());
       renderItems();
     });
 
-    row.appendChild(desc);
+    row.appendChild(name);
     row.appendChild(amt);
     row.appendChild(del);
     box.appendChild(row);
-    if (hint) box.appendChild(hint);
+    box.appendChild(hint);
   });
-  renderTotal();
+  renderSummary();
+}
+
+/* Asks the server what this product costs. Fills the price in when it knows,
+   and otherwise leaves the row exactly as it is — an unrecognised name is an
+   ordinary custom line, not an error worth interrupting anyone over. */
+async function resolveRow(index, nameInput, amtInput, hint) {
+  var typed = nameInput.value.trim();
+  if (!typed) return;
+
+  /* Each lookup stamps the row. A reply is only applied if it is still the
+     newest request for that row, so a slow response for an old product name
+     cannot land on top of a newer one and quietly misprice the line. */
+  var mine = ++rowSeq;
+  items[index].seq = mine;
+
+  var r;
+  try {
+    r = await postJson('/api/staff-resolve-price', { productName: typed });
+  } catch (err) {
+    return; // offline or blocked — manual entry still works
+  }
+  if (r.status === 401) { handleUnauthorized(); return; }
+  if (!items[index] || items[index].seq !== mine) return;  // superseded, or the row was removed
+  if (!r.ok || !r.data.resolved) return;
+
+  // The canonical catalogue name is what belongs on a customer's invoice.
+  items[index].name = r.data.label;
+  nameInput.value = r.data.label;
+
+  items[index].amount = String(r.data.salePrice);
+  amtInput.value = items[index].amount;
+  items[index].fromCatalog = true;
+  show(hint, true);
+
+  renderSummary();
 }
 
 /* Display only. The server re-validates and re-totals every amount; this is
@@ -310,37 +310,89 @@ function parseAmount(raw) {
   return isFinite(n) ? n : null;
 }
 
-function renderTotal() {
+function formatRM(n) {
+  return 'RM ' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/* Reads the invoice back as plain text, line by line, so every amount is seen
+   once more before the button that charges a customer. */
+function renderSummary() {
+  var box = el('summary');
+  box.textContent = '';
+
   var total = 0;
   var incomplete = false;
+  var shown = 0;
+
   items.forEach(function (item) {
+    var named = item.name.trim();
     var n = parseAmount(item.amount);
-    if (n === null) { incomplete = true; return; }
-    total += n;
+    if (!named && n === null) return;   // an untouched empty row is not a finding
+
+    var line = document.createElement('div');
+    line.className = 'summary-line';
+
+    var name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = named || '(no product name)';
+
+    var value = document.createElement('span');
+    value.className = 'value';
+    if (n === null) {
+      value.classList.add('missing');
+      value.textContent = 'price needed';
+      incomplete = true;
+    } else {
+      value.textContent = formatRM(n);
+      total += n;
+    }
+
+    line.appendChild(name);
+    line.appendChild(value);
+    box.appendChild(line);
+    shown++;
   });
-  el('total').textContent = 'Total: RM ' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    + (incomplete ? '  (some amounts still missing)' : '');
+
+  show(box, shown > 0);
+  el('total').textContent = shown === 0
+    ? ''
+    : 'Total: ' + formatRM(total) + (incomplete ? '  (some amounts still missing)' : '');
 }
 
 el('addItem').addEventListener('click', function () {
-  items.push({ description: '', amount: '' });
+  items.push(blankRow());
   renderItems();
+  // Put the cursor in the row they just asked for.
+  var boxes = el('items').querySelectorAll('input.desc');
+  if (boxes.length) boxes[boxes.length - 1].focus();
 });
 
-/* ── Confirm → create the real invoice ───────────────────── */
-el('confirmBtn').addEventListener('click', async function () {
+/* ── Submit → create the real invoice ────────────────────── */
+el('invoiceForm').addEventListener('submit', async function (e) {
+  e.preventDefault();
   setError(el('draftErr'), '');
   el('confirmBtn').disabled = true;
   el('confirmBtn').textContent = 'Creating…';
 
   try {
+    /* Rows left completely blank are dropped rather than sent — the form always
+       keeps one empty row on screen, and the server would reject it as a line
+       item with no description. Everything else goes exactly as typed; the
+       server re-validates all of it either way. */
+    var lineItems = items
+      .filter(function (item) { return item.name.trim() !== '' || String(item.amount).trim() !== ''; })
+      .map(function (item) {
+        // The Product Name box is the description. On a resolved row it already
+        // holds the canonical catalogue label, and if the staff member edited it
+        // afterwards their wording is the one that should reach the customer.
+        return { description: item.name, amount: item.amount };
+      });
+
     var payload = {
       customerName: el('custName').value,
       customerEmail: el('custEmail').value,
       currency: 'myr',
-      lineItems: items.map(function (item) {
-        return { description: item.description, amount: item.amount };
-      })
+      lineItems: lineItems
     };
 
     var r = await postJson('/api/staff-create-invoice', payload);
@@ -359,7 +411,7 @@ el('confirmBtn').addEventListener('click', async function () {
     setError(el('draftErr'), 'Could not reach the server.');
   } finally {
     el('confirmBtn').disabled = false;
-    el('confirmBtn').textContent = 'Confirm & Create Invoice';
+    el('confirmBtn').textContent = 'Create Invoice';
   }
 });
 
@@ -376,12 +428,7 @@ el('copyBtn').addEventListener('click', async function () {
 });
 
 el('newBtn').addEventListener('click', function () {
-  history_ = [];
-  items = [];
-  el('log').textContent = '';
-  show(el('doneCard'), false);
-  show(el('draftCard'), false);
-  el('chatInput').focus();
+  startNewInvoice();
 });
 </script>
 </body>

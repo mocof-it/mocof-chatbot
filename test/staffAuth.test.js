@@ -30,6 +30,10 @@ import {
     MAX_INVOICE_AMOUNT_RM
 } from '../lib/invoiceInput.js';
 
+import resolvePriceHandler from '../api/staff-resolve-price.js';
+import { WALLBED_MODEL_PRICING } from '../knowledge/wallbeds.js';
+import { BASIC_SOFA_PRICING } from '../knowledge/basicfurniture.js';
+
 import {
     normalizeProductName,
     buildProductNameReference,
@@ -441,5 +445,114 @@ describe('product name normalization', () => {
         // Normalization must not have disturbed the amounts.
         assert.equal(parsed.lineItems[0].amount, 14371.55);
         assert.equal(parsed.lineItems[1].amount, 5000);
+    });
+});
+
+// =============================================================
+// POST /api/staff-resolve-price — the lookup the staff invoice form calls to
+// pre-fill a price. Testable directly (unlike api/staff-create-invoice.js) only
+// because it imports nothing but lib/staffAuth.js: no stripe, no network.
+//
+// Two properties matter here. It must refuse an unauthenticated caller like
+// every other staff route, and a product it cannot price must come back as a
+// plain "no" — an error would make the form look broken while a staff member is
+// halfway through filling it in, when a custom line having no catalogue price
+// is completely normal.
+// =============================================================
+describe('staff price lookup endpoint', () => {
+    const cookie = `${STAFF_COOKIE_NAME}=${signStaffToken()}`;
+
+    function makeRes() {
+        const res = { statusCode: null, body: null, headers: {} };
+        res.setHeader = (k, v) => { res.headers[k] = v; };
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json = (payload) => { res.body = payload; return res; };
+        res.end = () => res;
+        return res;
+    }
+    const call = async (req) => { const res = makeRes(); await resolvePriceHandler(req, res); return res; };
+    const authed = (body) => ({ method: 'POST', headers: { host: 'x', cookie }, body });
+
+    test('refuses a caller with no session, and leaks nothing', async () => {
+        const res = await call({ method: 'POST', headers: { host: 'x' }, body: { productName: 'Murano Queen' } });
+        assert.equal(res.statusCode, 401);
+        assert.equal(res.body?.salePrice ?? null, null, 'a 401 must not carry a price');
+    });
+
+    test('refuses a forged session cookie', async () => {
+        const res = await call({
+            method: 'POST',
+            headers: { host: 'x', cookie: `${STAFF_COOKIE_NAME}=${Date.now() + 999999}.${'a'.repeat(64)}` },
+            body: { productName: 'Murano Queen' }
+        });
+        assert.equal(res.statusCode, 401);
+    });
+
+    test('rejects anything but POST', async () => {
+        const res = await call({ method: 'GET', headers: { host: 'x', cookie }, body: {} });
+        assert.equal(res.statusCode, 405);
+    });
+
+    test('resolves a catalog product to its canonical name and sale price', async () => {
+        for (const [productName, label, salePrice] of [
+            ['Murano Queen', 'Murano Queen', 14371.55],
+            ['murano q', 'Murano Queen', 14371.55],
+            ['gioco single desk', 'Gioco Single Desk', 17538.11],
+            ['lumina', 'Lumina Sofa', 7069.30]
+        ]) {
+            const res = await call(authed({ productName }));
+            assert.equal(res.statusCode, 200);
+            assert.deepEqual(res.body, { resolved: true, label, salePrice }, `for "${productName}"`);
+        }
+    });
+
+    test('an unpriceable product is a 200 "no", never an error', async () => {
+        // The form treats this as "type the amount in yourself".
+        for (const productName of ['delivery charge', 'custom cabinetry job', 'site survey fee', 'nebulatte', 'not a product at all']) {
+            const res = await call(authed({ productName }));
+            assert.equal(res.statusCode, 200, `"${productName}" must not error`);
+            assert.deepEqual(res.body, { resolved: false, label: null, salePrice: null });
+        }
+    });
+
+    test('an empty or blank name is not an error either', async () => {
+        // The field is asked about whenever it changes, including being cleared.
+        for (const productName of ['', '   ']) {
+            const res = await call(authed({ productName }));
+            assert.equal(res.statusCode, 200);
+            assert.equal(res.body.resolved, false);
+        }
+    });
+
+    test('rejects a non-string, a missing field, and an oversized name', async () => {
+        for (const body of [{ productName: 42 }, { productName: null }, { productName: ['x'] }, {}]) {
+            const res = await call(authed(body));
+            assert.equal(res.statusCode, 400, `for ${JSON.stringify(body)}`);
+        }
+        assert.equal((await call(authed({ productName: 'x'.repeat(201) }))).statusCode, 400);
+        assert.equal((await call(authed({ productName: 'x'.repeat(200) }))).statusCode, 200, '200 chars is within the cap');
+    });
+
+    test('a missing body does not crash the handler', async () => {
+        const res = await call({ method: 'POST', headers: { host: 'x', cookie } });
+        assert.equal(res.statusCode, 400);
+    });
+
+    test('never caches — a price change must not be served stale', async () => {
+        const res = await call(authed({ productName: 'Murano Queen' }));
+        assert.equal(res.headers['Cache-Control'], 'no-store');
+    });
+
+    test('the price it returns always matches the catalog table', async () => {
+        // Guards against this endpoint and the tables drifting apart, which
+        // would put a figure on an invoice that the bot never quotes.
+        for (const model of WALLBED_MODEL_PRICING) {
+            const res = await call(authed({ productName: model.label }));
+            assert.equal(res.body.salePrice, model.sale, `${model.label} sale price`);
+        }
+        for (const sofa of BASIC_SOFA_PRICING) {
+            const res = await call(authed({ productName: sofa.label }));
+            assert.equal(res.body.salePrice, sofa.sale, `${sofa.label} sale price`);
+        }
     });
 });
