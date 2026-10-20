@@ -2,8 +2,15 @@
 // FILE: api/staff-create-invoice.js
 // Creates a REAL Stripe invoice from fields a staff member reviewed and
 // confirmed. Endpoint: POST /api/staff-create-invoice
-// Body: { customerName, customerEmail, lineItems: [{description, amount}], currency }
+// Body: { customerName, customerEmail, currency,
+//         address?, contact?, salesPerson?, location?,
+//         lineItems: [{ description, quantity, unitAmount }] }
 // Env vars: STRIPE_SECRET_KEY, STAFF_*
+//
+// The optional fields are presentation only — they decide what the customer
+// READS on the invoice (Bill to, and the Contact / Sales Person / Location
+// custom fields), never what they are charged. Nothing here is tax, SST or
+// e-invoice handling; that lives in QuickBooks and deliberately not here.
 //
 // This is the only file in the staff tool that creates anything. It takes
 // structured fields, never free text and never the model's raw output — by the
@@ -47,16 +54,41 @@ export default async function handler(req, res) {
         // Nothing has been created at this point, and nothing will be.
         return res.status(400).json({ error: validation.error });
     }
-    const { customerName, customerEmail, currency, lineItems } = validation.value;
+    const { customerName, customerEmail, currency, lineItems, address, contact, salesPerson, location } = validation.value;
+
+    // Stripe prints these above the line items. Named here rather than in
+    // lib/invoiceInput.js because the labels are a Stripe presentation detail,
+    // and the limit of 4 is Stripe's — three is all this form collects, so
+    // there is nothing to trim. Empty ones are skipped: a blank custom field
+    // still renders as an empty row on the customer's invoice.
+    const customFields = [
+        { name: 'Contact', value: contact },
+        { name: 'Sales Person', value: salesPerson },
+        { name: 'Location', value: location }
+    ].filter(field => Boolean(field.value));
 
     try {
         // 1. Reuse the customer if MOCOF has invoiced this address before, so
         //    Stripe's dashboard shows one customer with a payment history
         //    rather than a new record per invoice.
         const existing = await stripe.customers.list({ email: customerEmail, limit: 1 });
-        const customer = existing.data.length > 0
-            ? existing.data[0]
-            : await stripe.customers.create({ email: customerEmail, name: customerName });
+        let customer;
+        if (existing.data.length > 0) {
+            customer = existing.data[0];
+            // A reused customer may carry an older address, or none. Update it
+            // BEFORE the invoice is finalized — finalizing snapshots the
+            // customer's details onto the invoice, so an update afterwards
+            // would not appear on the document the customer actually receives.
+            if (address) {
+                customer = await stripe.customers.update(customer.id, { address, name: customerName });
+            }
+        } else {
+            customer = await stripe.customers.create({
+                email: customerEmail,
+                name: customerName,
+                ...(address ? { address } : {})
+            });
+        }
 
         // 2. Create the DRAFT invoice before its line items, then attach each
         //    item to it explicitly by id.
@@ -75,14 +107,20 @@ export default async function handler(req, res) {
             // sweep in unrelated pending items from any other flow.
             pending_invoice_items_behavior: 'exclude',
             description: `MOCOF order for ${customerName}`,
-            metadata: { source: 'mocof_staff_invoice_tool' }
+            metadata: { source: 'mocof_staff_invoice_tool' },
+            ...(customFields.length > 0 ? { custom_fields: customFields } : {})
         });
 
         for (const item of lineItems) {
             await stripe.invoiceItems.create({
                 customer: customer.id,
                 invoice: invoice.id,
-                amount: item.amountCents,
+                // unit_amount + quantity rather than a single flat amount, so
+                // the customer's invoice shows the arithmetic: 3 × RM 500.00 =
+                // RM 1,500.00. Stripe does that multiplication itself, which is
+                // also why the validator hands over a UNIT price.
+                quantity: item.quantity,
+                unit_amount: item.unitAmountCents,
                 currency,
                 description: item.description
             });

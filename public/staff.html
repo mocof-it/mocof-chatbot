@@ -37,6 +37,9 @@
   .row { display: flex; gap: 8px; align-items: flex-start; }
   .row input.desc { flex: 1; }
   .row input.amt { width: 130px; }
+  .lineitem input.desc { flex: 1; min-width: 0; }
+  .lineitem input.qty { width: 72px; flex: none; }
+  .lineitem input.amt { width: 120px; flex: none; }
   .lineitem { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   /* Sits under its line item rather than inside it, so the row's flex layout
      is untouched. Hidden the moment the staff member types over the amount —
@@ -85,6 +88,31 @@
 
         <label for="custEmail">Customer email</label>
         <input type="email" id="custEmail" required>
+
+        <label for="contact">Contact number <span class="muted">— optional</span></label>
+        <input type="text" id="contact" inputmode="tel" placeholder="012-345 6789">
+
+        <!-- Printed as "Bill to" on the invoice. Everything here is optional;
+             a blank field is simply left off the document. -->
+        <label>Billing address <span class="muted">— optional</span></label>
+        <input type="text" id="addrLine1" placeholder="Address line 1">
+        <input type="text" id="addrLine2" placeholder="Address line 2" style="margin-top:8px;">
+        <div class="row" style="margin-top:8px;">
+          <input type="text" id="addrCity" placeholder="City">
+          <input type="text" id="addrPostcode" placeholder="Postcode" style="width:130px;">
+        </div>
+        <input type="text" id="addrState" placeholder="State" style="margin-top:8px;">
+
+        <div class="row" style="margin-top:12px;">
+          <div style="flex:1;">
+            <label for="salesPerson" style="margin-top:0;">Sales person <span class="muted">— optional</span></label>
+            <input type="text" id="salesPerson">
+          </div>
+          <div style="flex:1;">
+            <label for="location" style="margin-top:0;">Location <span class="muted">— optional</span></label>
+            <input type="text" id="location" placeholder="Showroom or branch">
+          </div>
+        </div>
 
         <label>Products</label>
         <div id="items"></div>
@@ -187,12 +215,15 @@ el('loginForm').addEventListener('submit', async function (e) {
 
 /* ── Product rows ────────────────────────────────────────── */
 function blankRow() {
-  return { name: '', amount: '', fromCatalog: false, seq: 0 };
+  // Quantity starts at 1 because almost every line is one of something, and a
+  // blank box would otherwise be a required field pretending to be optional.
+  return { name: '', quantity: '1', amount: '', fromCatalog: false, seq: 0 };
 }
 
 function startNewInvoice() {
-  el('custName').value = '';
-  el('custEmail').value = '';
+  ['custName', 'custEmail', 'contact', 'salesPerson', 'location',
+   'addrLine1', 'addrLine2', 'addrCity', 'addrPostcode', 'addrState']
+    .forEach(function (id) { el(id).value = ''; });
   items = [blankRow()];
   renderItems();
   show(el('draftCard'), true);
@@ -215,17 +246,34 @@ function renderItems() {
     name.value = item.name;
     name.addEventListener('input', function () { items[index].name = name.value; renderSummary(); });
 
+    // Quantity multiplies the unit price below it, so it sits between the
+    // product and its price — reading left to right as "what × how many @ how
+    // much each", the same order the finished invoice prints.
+    var qty = document.createElement('input');
+    qty.type = 'number';
+    qty.min = '1';
+    qty.step = '1';
+    qty.className = 'qty';
+    qty.title = 'Quantity';
+    qty.placeholder = 'Qty';
+    qty.value = item.quantity;
+    qty.addEventListener('input', function () {
+      items[index].quantity = qty.value;
+      renderSummary();
+    });
+
     var amt = document.createElement('input');
     amt.type = 'number';
     amt.step = '0.01';
     amt.min = '0';
     amt.className = 'amt';
-    amt.placeholder = 'RM';
+    amt.title = 'Price per unit';
+    amt.placeholder = 'RM each';
     amt.value = item.amount;
 
     var hint = document.createElement('div');
     hint.className = 'catalog-hint';
-    hint.textContent = 'Catalogue price — editable';
+    hint.textContent = 'Catalogue unit price — editable';
     show(hint, item.fromCatalog);
 
     /* Look the price up when they leave the field. `change` fires on blur only
@@ -258,6 +306,7 @@ function renderItems() {
     });
 
     row.appendChild(name);
+    row.appendChild(qty);
     row.appendChild(amt);
     row.appendChild(del);
     box.appendChild(row);
@@ -310,6 +359,16 @@ function parseAmount(raw) {
   return isFinite(n) ? n : null;
 }
 
+/* Mirrors toQuantity() in lib/invoiceInput.js: blank means one, and only a
+   whole number counts. Display only — the server decides either way. */
+function parseQuantity(raw) {
+  var cleaned = String(raw === null || raw === undefined ? '' : raw).trim();
+  if (cleaned === '') return 1;
+  if (!/^\d+$/.test(cleaned)) return null;
+  var n = Number(cleaned);
+  return n >= 1 ? n : null;
+}
+
 function formatRM(n) {
   return 'RM ' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -326,25 +385,34 @@ function renderSummary() {
 
   items.forEach(function (item) {
     var named = item.name.trim();
-    var n = parseAmount(item.amount);
-    if (!named && n === null) return;   // an untouched empty row is not a finding
+    var unit = parseAmount(item.amount);
+    var qty = parseQuantity(item.quantity);
+    if (!named && unit === null) return;   // an untouched empty row is not a finding
 
     var line = document.createElement('div');
     line.className = 'summary-line';
 
     var name = document.createElement('span');
     name.className = 'name';
-    name.textContent = named || '(no product name)';
+    // Spell the arithmetic out, so a wrong quantity is as obvious as a wrong
+    // price. Only worth saying for more than one — "× 1" is just noise.
+    name.textContent = (named || '(no product name)')
+      + (unit !== null && qty !== null && qty > 1 ? '  × ' + qty + ' @ ' + formatRM(unit) : '');
 
     var value = document.createElement('span');
     value.className = 'value';
-    if (n === null) {
+    if (unit === null) {
       value.classList.add('missing');
       value.textContent = 'price needed';
       incomplete = true;
+    } else if (qty === null) {
+      value.classList.add('missing');
+      value.textContent = 'whole quantity needed';
+      incomplete = true;
     } else {
-      value.textContent = formatRM(n);
-      total += n;
+      var lineTotal = Math.round(qty * unit * 100) / 100;
+      value.textContent = formatRM(lineTotal);
+      total += lineTotal;
     }
 
     line.appendChild(name);
@@ -385,7 +453,7 @@ el('invoiceForm').addEventListener('submit', async function (e) {
         // The Product Name box is the description. On a resolved row it already
         // holds the canonical catalogue label, and if the staff member edited it
         // afterwards their wording is the one that should reach the customer.
-        return { description: item.name, amount: item.amount };
+        return { description: item.name, quantity: item.quantity, unitAmount: item.amount };
       });
 
     var payload = {
@@ -394,6 +462,26 @@ el('invoiceForm').addEventListener('submit', async function (e) {
       currency: 'myr',
       lineItems: lineItems
     };
+
+    /* The optional, customer-facing fields. Sent only when filled: an empty
+       string would still be a key the server has to decide to ignore, and a
+       blank custom field renders as an empty row on the customer's invoice. */
+    var address = {
+      line1: el('addrLine1').value,
+      line2: el('addrLine2').value,
+      city: el('addrCity').value,
+      postalCode: el('addrPostcode').value,
+      state: el('addrState').value
+    };
+    // line1 is what makes it an address at all — the server applies the same
+    // rule, this just avoids posting a half-empty object for nothing.
+    if (address.line1.trim() !== '') payload.address = address;
+
+    [['contact', 'contact'], ['salesPerson', 'salesPerson'], ['location', 'location']]
+      .forEach(function (pair) {
+        var typed = el(pair[1]).value.trim();
+        if (typed !== '') payload[pair[0]] = typed;
+      });
 
     var r = await postJson('/api/staff-create-invoice', payload);
     if (r.status === 401) { handleUnauthorized(); return; }

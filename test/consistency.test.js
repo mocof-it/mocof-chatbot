@@ -3334,7 +3334,7 @@ describe('staff invoice tool: catalog pricing', () => {
             });
             assert.equal(result.ok, true, result.ok ? '' : result.error);
             assert.equal(result.value.lineItems[0].description, 'Murano Queen');
-            assert.equal(result.value.lineItems[0].amountCents, 1437155);
+            assert.equal(result.value.lineItems[0].unitAmountCents, 1437155);
         });
     });
 });

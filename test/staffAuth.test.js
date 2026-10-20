@@ -27,7 +27,8 @@ import {
 import {
     validateInvoiceInput,
     parseProposedInvoice,
-    MAX_INVOICE_AMOUNT_RM
+    MAX_INVOICE_AMOUNT_RM,
+    MAX_LINE_QUANTITY
 } from '../lib/invoiceInput.js';
 
 import resolvePriceHandler from '../api/staff-resolve-price.js';
@@ -197,7 +198,7 @@ describe('invoice input validation', () => {
         const result = validateInvoiceInput(VALID);
         assert.equal(result.ok, true, result.error);
         assert.equal(result.value.customerEmail, 'aisyah@example.com');
-        assert.deepEqual(result.value.lineItems.map(i => i.amountCents), [1437155, 30000]);
+        assert.deepEqual(result.value.lineItems.map(i => i.unitAmountCents), [1437155, 30000]);
         assert.equal(result.value.totalRm, 14671.55);
         assert.equal(result.value.currency, 'myr');
     });
@@ -224,7 +225,7 @@ describe('invoice input validation', () => {
             lineItems: [{ description: 'Wall bed', amount: 'RM 14,371.55' }]
         });
         assert.equal(result.ok, true, result.error);
-        assert.equal(result.value.lineItems[0].amountCents, 1437155);
+        assert.equal(result.value.lineItems[0].unitAmountCents, 1437155);
     });
 
     test('rejects a malformed email', () => {
@@ -554,5 +555,190 @@ describe('staff price lookup endpoint', () => {
             const res = await call(authed({ productName: sofa.label }));
             assert.equal(res.body.salePrice, sofa.sale, `${sofa.label} sale price`);
         }
+    });
+});
+
+// =============================================================
+// Quantities, and the customer-facing detail fields.
+//
+// Quantity is the second factor in a line total, so it is as much a money
+// input as the price is — these pin that it cannot smuggle a bad number past
+// the RM 100,000 caps, and that the pre-quantity request shape still works,
+// since every caller written before quantities existed sends a flat `amount`.
+//
+// The detail fields (address, contact, sales person, location) are the
+// opposite kind of input: printed, never calculated. They are trimmed rather
+// than rejected, because refusing to invoice over a long address line would be
+// a worse outcome than a truncated one.
+// =============================================================
+describe('invoice line quantities', () => {
+    const BASE = { customerName: 'Aisyah', customerEmail: 'aisyah@example.com' };
+    const withLines = (lineItems, extra = {}) => validateInvoiceInput({ ...BASE, ...extra, lineItems });
+
+    test('defaults to 1 when absent, null, or an empty box', () => {
+        for (const quantity of [undefined, null, '', '   ']) {
+            const result = withLines([{ description: 'Wall bed', quantity, unitAmount: 100 }]);
+            assert.equal(result.ok, true, result.error);
+            assert.equal(result.value.lineItems[0].quantity, 1, `for ${JSON.stringify(quantity)}`);
+            assert.equal(result.value.totalRm, 100);
+        }
+    });
+
+    test('accepts a whole number, as a number or a typed string', () => {
+        assert.equal(withLines([{ description: 'X', quantity: 4, unitAmount: 25 }]).value.lineItems[0].quantity, 4);
+        assert.equal(withLines([{ description: 'X', quantity: '4', unitAmount: 25 }]).value.lineItems[0].quantity, 4);
+        assert.equal(withLines([{ description: 'X', quantity: ' 4 ', unitAmount: 25 }]).value.lineItems[0].quantity, 4);
+    });
+
+    test('rejects a fraction rather than rounding it', () => {
+        // Rounding would change what the customer is billed for, and we cannot
+        // know which way the staff member meant it.
+        for (const quantity of [2.5, '2.5', 0.5, '1.0']) {
+            const result = withLines([{ description: 'X', quantity, unitAmount: 10 }]);
+            assert.equal(result.ok, false, `expected rejection for ${JSON.stringify(quantity)}`);
+            assert.match(result.error, /whole-number quantity/);
+        }
+    });
+
+    test('rejects zero, negatives, and nonsense', () => {
+        for (const quantity of [0, '0', -1, -3, 'two', true, {}, [], NaN, Infinity]) {
+            assert.equal(withLines([{ description: 'X', quantity, unitAmount: 10 }]).ok, false,
+                `expected rejection for ${JSON.stringify(quantity)}`);
+        }
+    });
+
+    test('enforces a quantity ceiling, with the limit itself allowed', () => {
+        assert.equal(withLines([{ description: 'X', quantity: MAX_LINE_QUANTITY, unitAmount: 0.01 }]).ok, true);
+        const over = withLines([{ description: 'X', quantity: MAX_LINE_QUANTITY + 1, unitAmount: 0.01 }]);
+        assert.equal(over.ok, false);
+        assert.match(over.error, /quantity limit/);
+    });
+
+    test('the line total is quantity × unit price', () => {
+        const result = withLines([
+            { description: 'Wall bed', quantity: 2, unitAmount: 1000 },
+            { description: 'Delivery', quantity: 3, unitAmount: 150 }
+        ]);
+        assert.equal(result.ok, true, result.error);
+        assert.equal(result.value.totalRm, 2450);
+        // Stripe is handed the UNIT price and multiplies by quantity itself.
+        assert.deepEqual(result.value.lineItems.map(i => [i.quantity, i.unitAmountCents]), [[2, 100000], [3, 15000]]);
+    });
+
+    test('the per-line cap binds on the LINE TOTAL, not the unit price', () => {
+        // The whole point of adding quantity to the cap: RM 2,000 is a fine
+        // unit price, and 60 of them is not a fine invoice line.
+        const over = withLines([{ description: 'X', quantity: 60, unitAmount: 2000 }]);
+        assert.equal(over.ok, false, '60 × 2000 = 120,000 must be rejected');
+        assert.match(over.error, /safety limit/);
+
+        // Exactly at the ceiling is still allowed.
+        const atCap = withLines([{ description: 'X', quantity: 50, unitAmount: 2000 }]);
+        assert.equal(atCap.ok, true, atCap.error);
+        assert.equal(atCap.value.totalRm, MAX_INVOICE_AMOUNT_RM);
+    });
+
+    test('the invoice cap sums line totals, not unit prices', () => {
+        // Neither line is over on its own; together they are.
+        const result = withLines([
+            { description: 'A', quantity: 30, unitAmount: 2000 },
+            { description: 'B', quantity: 30, unitAmount: 2000 }
+        ]);
+        assert.equal(result.ok, false);
+        assert.match(result.error, /invoice total exceeds/);
+    });
+
+    test('reads the unit price from unitAmount, or from a legacy amount', () => {
+        const modern = withLines([{ description: 'X', quantity: 2, unitAmount: 500 }]);
+        const legacy = withLines([{ description: 'X', quantity: 2, amount: 500 }]);
+        assert.equal(modern.value.lineItems[0].unitAmount, 500);
+        assert.equal(legacy.value.lineItems[0].unitAmount, 500, 'a bare amount IS the unit price');
+        assert.equal(legacy.value.totalRm, 1000);
+        // unitAmount wins when both are present — it is the field the form sends.
+        const both = withLines([{ description: 'X', unitAmount: 500, amount: 9999 }]);
+        assert.equal(both.value.lineItems[0].unitAmount, 500);
+    });
+
+    test('the pre-quantity request shape still validates unchanged', () => {
+        // Anything written before quantities existed sends {description, amount}
+        // and must keep working, as one of each.
+        const result = withLines([{ description: 'Murano Queen', amount: 14371.55 }]);
+        assert.equal(result.ok, true, result.error);
+        assert.deepEqual(result.value.lineItems[0], {
+            description: 'Murano Queen', quantity: 1, unitAmount: 14371.55, unitAmountCents: 1437155
+        });
+        assert.equal(result.value.totalRm, 14371.55);
+    });
+});
+
+describe('invoice customer-facing detail fields', () => {
+    const BASE = {
+        customerName: 'Aisyah',
+        customerEmail: 'aisyah@example.com',
+        lineItems: [{ description: 'Wall bed', unitAmount: 100 }]
+    };
+    const withExtra = (extra) => validateInvoiceInput({ ...BASE, ...extra });
+
+    test('an invoice with none of them is unchanged', () => {
+        const value = withExtra({}).value;
+        for (const key of ['address', 'contact', 'salesPerson', 'location']) {
+            assert.ok(!(key in value), `${key} must be absent, not empty`);
+        }
+    });
+
+    test('a full address comes back in Stripe shape, defaulted to Malaysia', () => {
+        const value = withExtra({
+            address: { line1: ' 12 Jalan Satu ', line2: 'Unit 5', city: 'Kuala Lumpur', postalCode: '50000', state: 'WP' }
+        }).value;
+        assert.deepEqual(value.address, {
+            line1: '12 Jalan Satu', country: 'MY', line2: 'Unit 5',
+            city: 'Kuala Lumpur', postal_code: '50000', state: 'WP'
+        });
+    });
+
+    test('line1 alone is enough, and the rest are omitted', () => {
+        assert.deepEqual(withExtra({ address: { line1: '12 Jalan Satu' } }).value.address,
+            { line1: '12 Jalan Satu', country: 'MY' });
+    });
+
+    test('an address with no line1 is dropped entirely', () => {
+        // A city with no street is not worth printing, and a half-filled
+        // address would overwrite a good one on a returning customer.
+        for (const address of [{ city: 'KL', postalCode: '50000' }, { line1: '  ' }, {}, null, 'nope', []]) {
+            assert.ok(!('address' in withExtra({ address }).value), `for ${JSON.stringify(address)}`);
+        }
+    });
+
+    test('contact, sales person and location are trimmed and kept', () => {
+        const value = withExtra({ contact: ' 012-345 6789 ', salesPerson: ' Aisyah ', location: ' Puchong ' }).value;
+        assert.equal(value.contact, '012-345 6789');
+        assert.equal(value.salesPerson, 'Aisyah');
+        assert.equal(value.location, 'Puchong');
+    });
+
+    test('blank or non-string details are omitted, never sent empty', () => {
+        // An empty custom field renders as an empty row on the customer's invoice.
+        const value = withExtra({ contact: '   ', salesPerson: '', location: 42 }).value;
+        for (const key of ['contact', 'salesPerson', 'location']) {
+            assert.ok(!(key in value), `${key} must be absent`);
+        }
+    });
+
+    test('over-length text is trimmed, never a reason to refuse the invoice', () => {
+        const value = withExtra({
+            contact: 'x'.repeat(500),
+            address: { line1: 'y'.repeat(500) }
+        }).value;
+        assert.equal(value.contact.length, 100);
+        assert.equal(value.address.line1.length, 200);
+    });
+
+    test('none of them can make a valid invoice invalid', () => {
+        const result = withExtra({
+            address: { line1: 'x'.repeat(999) }, contact: 'y'.repeat(999),
+            salesPerson: { nope: true }, location: ['also nope']
+        });
+        assert.equal(result.ok, true, result.ok ? '' : result.error);
+        assert.equal(result.value.totalRm, 100, 'the money is untouched by any of this');
     });
 });
