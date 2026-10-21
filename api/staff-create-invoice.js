@@ -115,12 +115,18 @@ export default async function handler(req, res) {
             await stripe.invoiceItems.create({
                 customer: customer.id,
                 invoice: invoice.id,
-                // unit_amount + quantity rather than a single flat amount, so
+                // A unit price + quantity rather than a single flat amount, so
                 // the customer's invoice shows the arithmetic: 3 × RM 500.00 =
                 // RM 1,500.00. Stripe does that multiplication itself, which is
                 // also why the validator hands over a UNIT price.
+                //
+                // The Invoice Items API takes `unit_amount_decimal` — a STRING
+                // of cents — and has no `unit_amount` field, unlike Checkout's
+                // price_data (see api/create-deposit.js, where the integer form
+                // is correct). Passing the integer field here is silently wrong
+                // until Stripe rejects the request.
                 quantity: item.quantity,
-                unit_amount: item.unitAmountCents,
+                unit_amount_decimal: String(item.unitAmountCents),
                 currency,
                 description: item.description
             });
