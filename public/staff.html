@@ -5,6 +5,31 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <title>MOCOF — Staff Invoice Tool</title>
+
+<!-- pdfmake, for the branded invoice PDF built in the browser (see
+     buildInvoiceDocDefinition below). Pinned to an exact version with an SRI
+     hash, because this page handles invoice data and a silently-swapped CDN
+     script would be reading it.
+
+     `defer` on both: vfs_fonts.js is ~2MB of embedded font data and nothing
+     needs it until someone presses Download, so it must not block rendering
+     the login form. Order matters and defer preserves it — vfs_fonts.js calls
+     pdfMake.addVirtualFileSystem() and does nothing if pdfmake.min.js has not
+     run yet.
+
+     CSP: vercel.json sets only `frame-ancestors 'none'` on /staff, with no
+     script-src, so cdnjs is not blocked today. If a script-src directive is
+     ever added there, either allow cdnjs.cloudflare.com or vendor these two
+     files into public/ and point these tags at them. -->
+<script defer
+        src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.23/pdfmake.min.js"
+        integrity="sha512-9sbH2hd5es1juYCFXDxjDVLhUzPz63IttCCuJJb2sCvMjfI21lnLxYyGkASZMxSzZmMap1HWBEVPGnHKZ1Y44A=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script defer
+        src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.23/vfs_fonts.js"
+        integrity="sha512-iMeEtC2ZkqpY9to2VhCK9l/5jCSlpHt3nTWYn36wi3LY6WULjLv7OXewFH7fD1jYqp6Ychqci9aJ/FdSDLRAWA=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
 <style>
   * { box-sizing: border-box; }
   body {
@@ -55,6 +80,7 @@
   .summary-line .value.missing { color: #b00020; }
   .total { text-align: right; font-weight: 700; font-size: 15px; margin: 12px 0; }
   .hidden { display: none; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
   .linkbox { display: flex; gap: 8px; margin-top: 10px; }
   .linkbox input { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
   .warn { background: #fff8e1; border: 1px solid #ffe08a; border-radius: 10px; padding: 10px 12px; font-size: 12px; margin-bottom: 16px; }
@@ -136,7 +162,11 @@
         <button type="button" id="copyBtn">Copy</button>
       </div>
       <div class="ok hidden" id="copied">Copied to clipboard.</div>
-      <div style="margin-top:16px;"><button type="button" class="ghost" id="newBtn">Start another invoice</button></div>
+      <div class="actions">
+        <button type="button" id="pdfBtn">Download invoice PDF</button>
+        <button type="button" class="ghost" id="newBtn">Start another invoice</button>
+      </div>
+      <div class="err hidden" id="pdfErr"></div>
     </div>
   </div>
 
@@ -153,6 +183,42 @@
    browser holds no copy of the catalogue, so a figure on screen either came
    from that endpoint or was typed by the person looking at it. */
 
+/* ── MOCOF letterhead content ────────────────────────────
+   Everything printed on the invoice PDF that is the same on every invoice.
+   Grouped here so a change of address, bank account or lead time is one
+   obvious edit rather than a hunt through the layout code below. */
+var MOCOF_COMPANY = {
+  name: 'MOCOF SDN BHD',
+  address: '5-21, Bangunan Perdagangan D7, 800 Jalan Sentul, Kuala Lumpur',
+  phone: '+60327314568',
+  email: 'sales@mocof.com.my'
+};
+
+var MOCOF_BANK = {
+  heading: 'Payment made payable to',
+  lines: [
+    'Company: MOCOF SDN BHD',
+    'Bank: Public Bank Berhad',
+    'Acc: 320 539 4433',
+    'Swift code: PBBEMYKLXXX'
+  ]
+};
+
+var MOCOF_INVOICE_NOTES = [
+  'Goods sold, interior design fees and deposit made are neither returnable or refundable.',
+  'Lead time for wall bed and sofa bed is 30 - 45 business working days',
+  'Lead time for imported European products 60 - 90 business working days',
+  'Delivery operations start from 10:00am to 4:00pm (Monday - Friday)'
+];
+
+/* The PDF's own terms. Deliberately separate from the 3-day due date Stripe
+   puts on the hosted card invoice (DAYS_UNTIL_DUE in
+   api/staff-create-invoice.js): that one paces the payment link, this is the
+   commercial term printed for the customer. Changing one does not change the
+   other. */
+var PDF_TERMS_DAYS = 30;
+var PDF_TERMS_LABEL = 'Net 30';
+
 var el = function (id) { return document.getElementById(id); };
 
 /* One entry per product row.
@@ -163,6 +229,12 @@ var el = function (id) { return document.getElementById(id); };
                  resolveRow() */
 var items = [];
 var rowSeq = 0;
+
+/* Snapshot of the invoice that was just created, kept so the PDF can be built
+   after the fact. Taken at create time rather than read back off the form,
+   because the form is cleared for the next invoice and because these are the
+   figures Stripe actually accepted — not whatever is on screen now. */
+var lastInvoice = null;
 
 function show(node, visible) { node.classList.toggle('hidden', !visible); }
 
@@ -487,8 +559,36 @@ el('invoiceForm').addEventListener('submit', async function (e) {
     if (r.status === 401) { handleUnauthorized(); return; }
     if (!r.ok) { setError(el('draftErr'), r.data.error || 'Could not create the invoice.'); return; }
 
+    /* Everything the PDF needs, captured before the form is reset. Quantities
+       and prices are parsed to numbers here so the PDF does arithmetic on
+       numbers, not on the strings the inputs hold. The server already accepted
+       all of this, so the parses cannot fail — the fallbacks are belt-and-braces. */
+    lastInvoice = {
+      customerName: String(payload.customerName || '').trim(),
+      customerEmail: String(payload.customerEmail || '').trim(),
+      contact: payload.contact || '',
+      address: payload.address || null,
+      salesPerson: payload.salesPerson || '',
+      location: payload.location || '',
+      invoiceNumber: r.data.invoiceNumber || r.data.invoiceId || '',
+      hostedInvoiceUrl: r.data.hostedInvoiceUrl || '',
+      // Stripe's own total, not a number re-derived in the browser, so the PDF
+      // cannot disagree with the invoice the customer is actually paying.
+      total: typeof r.data.total === 'number' ? r.data.total : null,
+      lineItems: lineItems.map(function (li) {
+        var qty = parseQuantity(li.quantity);
+        var unit = parseAmount(li.unitAmount);
+        return {
+          description: li.description,
+          quantity: qty === null ? 1 : qty,
+          unitAmount: unit === null ? 0 : unit
+        };
+      })
+    };
+    setError(el('pdfErr'), '');
+
     el('link').value = r.data.hostedInvoiceUrl || '';
-    el('doneMeta').textContent = 'Invoice ' + (r.data.invoiceId || '')
+    el('doneMeta').textContent = 'Invoice ' + (r.data.invoiceNumber || r.data.invoiceId || '')
       + (typeof r.data.total === 'number'
           ? ' · RM ' + r.data.total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
           : '');
@@ -500,6 +600,225 @@ el('invoiceForm').addEventListener('submit', async function (e) {
   } finally {
     el('confirmBtn').disabled = false;
     el('confirmBtn').textContent = 'Create Invoice';
+  }
+});
+
+/* ── Branded invoice PDF ─────────────────────────────────
+   Built in the browser from lastInvoice. Presentation only: Stripe has
+   already finalized the invoice by the time any of this runs, so nothing here
+   can change what the customer owes — it re-prints figures the server
+   returned, on MOCOF letterhead, with both ways to pay on one page. */
+
+function formatMoney(n) {
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatDate(date) {
+  var pad = function (v) { return (v < 10 ? '0' : '') + v; };
+  return pad(date.getDate()) + '/' + pad(date.getMonth() + 1) + '/' + date.getFullYear();
+}
+
+function addDays(date, days) {
+  var copy = new Date(date.getTime());
+  copy.setDate(copy.getDate() + days);
+  return copy;
+}
+
+/* A customer name goes straight into a filename, so anything that is not
+   plainly safe is replaced rather than escaped. */
+function safeFilenamePart(text) {
+  var cleaned = String(text || '').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '');
+  return cleaned || 'invoice';
+}
+
+function buildInvoiceDocDefinition(inv) {
+  var today = new Date();
+  var due = addDays(today, PDF_TERMS_DAYS);
+
+  // BILL TO — the name always, then whichever address parts and contact
+  // number were actually filled in. A blank line would read as a mistake.
+  var billTo = [{ text: inv.customerName, bold: true }];
+  if (inv.address) {
+    var cityLine = [inv.address.postalCode, inv.address.city]
+      .map(function (part) { return String(part || '').trim(); })
+      .filter(Boolean).join(' ');
+    [inv.address.line1, inv.address.line2, cityLine, inv.address.state].forEach(function (line) {
+      var text = String(line || '').trim();
+      if (text !== '') billTo.push({ text: text });
+    });
+  }
+  if (inv.customerEmail) billTo.push({ text: inv.customerEmail });
+  if (inv.contact) billTo.push({ text: inv.contact });
+
+  var metaRows = [
+    ['INVOICE NO.', inv.invoiceNumber],
+    ['DATE', formatDate(today)],
+    ['DUE DATE', formatDate(due)],
+    ['TERMS', PDF_TERMS_LABEL]
+  ];
+  // Only when the staff member supplied them, so an invoice without them
+  // prints the plain four-row block.
+  if (inv.salesPerson) metaRows.push(['SALES PERSON', inv.salesPerson]);
+  if (inv.location) metaRows.push(['LOCATION', inv.location]);
+
+  var itemRows = [[
+    { text: 'ITEMS', style: 'th' },
+    { text: 'QTY', style: 'th', alignment: 'right' },
+    { text: 'RATE', style: 'th', alignment: 'right' },
+    { text: 'AMOUNT', style: 'th', alignment: 'right' }
+  ]];
+  var computed = 0;
+  inv.lineItems.forEach(function (li) {
+    var lineTotal = li.quantity * li.unitAmount;
+    computed += lineTotal;
+    itemRows.push([
+      { text: li.description },
+      { text: String(li.quantity), alignment: 'right' },
+      { text: formatMoney(li.unitAmount), alignment: 'right' },
+      { text: formatMoney(lineTotal), alignment: 'right' }
+    ]);
+  });
+  // Stripe's figure wins; the local sum is only a fallback if the response
+  // somehow carried no total.
+  var balanceDue = inv.total === null ? computed : inv.total;
+
+  // Both ways to pay, side by side, so the customer picks one without asking.
+  var cardColumn = [{ text: 'Pay by card online', style: 'payHeading' }];
+  if (inv.hostedInvoiceUrl) {
+    cardColumn.push({ text: inv.hostedInvoiceUrl, style: 'payLink', margin: [0, 2, 0, 6] });
+    // pdfmake renders the QR itself — no image fetch, so the PDF stays
+    // self-contained and works offline.
+    cardColumn.push({ qr: inv.hostedInvoiceUrl, fit: 110 });
+  } else {
+    cardColumn.push({ text: 'Link unavailable — contact MOCOF.', style: 'payBody' });
+  }
+
+  return {
+    pageSize: 'A4',
+    pageMargins: [40, 40, 40, 48],
+    defaultStyle: { font: 'Roboto', fontSize: 9, color: '#222222' },
+    styles: {
+      wordmark: { fontSize: 26, bold: true, alignment: 'right' },
+      companyName: { fontSize: 11, bold: true },
+      title: { fontSize: 20, bold: true, margin: [0, 18, 0, 12] },
+      sectionLabel: { fontSize: 9, bold: true, color: '#666666', margin: [0, 0, 0, 4] },
+      th: { bold: true, fontSize: 9, color: '#ffffff' },
+      metaLabel: { fontSize: 9, bold: true, color: '#666666' },
+      balanceLabel: { fontSize: 11, bold: true },
+      balanceValue: { fontSize: 14, bold: true },
+      payHeading: { fontSize: 9, bold: true },
+      payBody: { fontSize: 9 },
+      payLink: { fontSize: 8, color: '#0a58ca' },
+      note: { fontSize: 8, color: '#555555' }
+    },
+    content: [
+      {
+        columns: [
+          {
+            width: '*',
+            stack: [
+              { text: MOCOF_COMPANY.name, style: 'companyName' },
+              { text: MOCOF_COMPANY.address, margin: [0, 2, 0, 0] },
+              { text: MOCOF_COMPANY.phone },
+              { text: MOCOF_COMPANY.email }
+            ]
+          },
+          // A real logo image can replace this wordmark later — swap this one
+          // node for { image: ..., width: ... } and nothing else changes.
+          { width: 'auto', text: 'MOCOF', style: 'wordmark' }
+        ]
+      },
+      { text: 'INVOICE', style: 'title' },
+      {
+        columns: [
+          {
+            width: '*',
+            stack: [{ text: 'BILL TO', style: 'sectionLabel' }].concat(billTo)
+          },
+          {
+            width: 'auto',
+            table: {
+              body: metaRows.map(function (row) {
+                return [
+                  { text: row[0], style: 'metaLabel' },
+                  { text: String(row[1] || ''), alignment: 'right' }
+                ];
+              })
+            },
+            layout: 'noBorders'
+          }
+        ],
+        columnGap: 24
+      },
+      {
+        margin: [0, 18, 0, 0],
+        table: { headerRows: 1, widths: ['*', 40, 70, 80], body: itemRows },
+        layout: {
+          fillColor: function (rowIndex) { return rowIndex === 0 ? '#222222' : null; },
+          hLineWidth: function (i, node) { return (i === 0 || i === node.table.body.length) ? 0 : 0.5; },
+          vLineWidth: function () { return 0; },
+          hLineColor: function () { return '#dddddd'; },
+          paddingTop: function () { return 6; },
+          paddingBottom: function () { return 6; }
+        }
+      },
+      {
+        margin: [0, 14, 0, 0],
+        columns: [
+          { width: '*', text: '' },
+          {
+            width: 'auto',
+            table: {
+              body: [[
+                { text: 'BALANCE DUE', style: 'balanceLabel', margin: [0, 2, 12, 0] },
+                { text: 'MYR ' + formatMoney(balanceDue), style: 'balanceValue', alignment: 'right' }
+              ]]
+            },
+            layout: 'noBorders'
+          }
+        ]
+      },
+      {
+        margin: [0, 26, 0, 0],
+        columns: [
+          {
+            width: '*',
+            stack: [{ text: MOCOF_BANK.heading, style: 'payHeading', margin: [0, 0, 0, 4] }]
+              .concat(MOCOF_BANK.lines.map(function (line) { return { text: line, style: 'payBody' }; }))
+          },
+          { width: 'auto', stack: cardColumn }
+        ],
+        columnGap: 24
+      },
+      {
+        margin: [0, 26, 0, 0],
+        stack: MOCOF_INVOICE_NOTES.map(function (line) {
+          return { text: line, style: 'note', margin: [0, 0, 0, 2] };
+        })
+      }
+    ]
+  };
+}
+
+el('pdfBtn').addEventListener('click', function () {
+  setError(el('pdfErr'), '');
+  if (!lastInvoice) {
+    setError(el('pdfErr'), 'No invoice to export yet.');
+    return;
+  }
+  // The CDN can be blocked, offline, or fail its integrity check. Say so
+  // plainly instead of throwing into the console where nobody will look.
+  if (typeof pdfMake === 'undefined' || !pdfMake.createPdf) {
+    setError(el('pdfErr'), 'The PDF library did not load. Check the connection and reload this page — the payment link above still works.');
+    return;
+  }
+
+  try {
+    var filename = 'invoice_' + safeFilenamePart(lastInvoice.customerName)
+      + '_' + safeFilenamePart(lastInvoice.invoiceNumber) + '.pdf';
+    pdfMake.createPdf(buildInvoiceDocDefinition(lastInvoice)).download(filename);
+  } catch (err) {
+    setError(el('pdfErr'), 'Could not build the PDF: ' + (err && err.message ? err.message : 'unknown error'));
   }
 });
 

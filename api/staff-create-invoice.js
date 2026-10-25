@@ -139,6 +139,12 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
             invoiceId: finalized.id,
+            // Stripe's own human-readable number (e.g. "A1B2C3D4-0001"), which
+            // is assigned at finalize. It goes on the branded PDF the staff
+            // member sends, so the customer's copy and Stripe's record quote
+            // the same reference — this is why no separate numbering scheme
+            // exists here.
+            invoiceNumber: finalized.number,
             hostedInvoiceUrl: finalized.hosted_invoice_url,
             invoicePdf: finalized.invoice_pdf,
             total: typeof finalized.total === 'number' ? finalized.total / 100 : null,
