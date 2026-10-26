@@ -30,7 +30,7 @@ export const WALLBED_MODEL_PRICING = [
     { pattern: /murano\s*king/i,                     label: 'Murano King',          retail: 20269.22, sale: 15285.45 },
     { pattern: /murano\s*queen(?!\s*(sofa|desk|shelves))/i, label: 'Murano Queen',   retail: 19102.22, sale: 14371.55 },
     { pattern: /gioco\s*single\s*desk/i,             label: 'Gioco Single Desk',    retail: 25054.44, sale: 17538.11 },
-    { pattern: /gioco\s*queen/i,                     label: 'Gioco Queen',          retail: 20654.45, sale: 15458.12 },
+    { pattern: /gioco\s*queen/i,                     label: 'Gioco Queen',          retail: 20654.45, sale: 14458.12 },
     { pattern: /gioco\s*single(?!\s*desk)/i,         label: 'Gioco Single',         retail: 18698.89, sale: 13089.22 },
     { pattern: /gioco\s*bunk/i,                      label: 'Gioco Bunk Bed',       retail: 33365.56, sale: 26692.45 }
 ];
