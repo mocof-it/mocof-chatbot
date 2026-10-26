@@ -123,7 +123,7 @@ GIOCO MODELS (each model below is a SEPARATE, independently purchasable product 
   - Features: Synchronized desk stays perfectly level as bed folds down, max desk load 15kg, melamine white base, EDL laminate ends
 
 * Gioco Queen
-  - Price: RM 20,654.45 (retail) | RM 15,458.12 (sale)
+  - Price: RM 20,654.45 (retail) | RM 14,458.12 (sale)
   - Width: 204.6cm | Height: 170cm | Depth Closed: 45cm | Depth Opened: 181cm
   - Features: Horizontal fold, compressed air mechanism, soft open/close
   - Note: listed on the website storefront together with Gioco Single as one product page — confirm current price with WhatsApp before quoting if in doubt
