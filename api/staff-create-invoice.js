@@ -4,6 +4,7 @@
 // confirmed. Endpoint: POST /api/staff-create-invoice
 // Body: { customerName, customerEmail, currency,
 //         address?, contact?, salesPerson?, location?,
+//         icPassport?, tin?,
 //         lineItems: [{ description, quantity, unitAmount }] }
 // Env vars: STRIPE_SECRET_KEY, STAFF_*
 //
@@ -54,7 +55,22 @@ export default async function handler(req, res) {
         // Nothing has been created at this point, and nothing will be.
         return res.status(400).json({ error: validation.error });
     }
-    const { customerName, customerEmail, currency, lineItems, address, contact, salesPerson, location } = validation.value;
+    const {
+        customerName, customerEmail, currency, lineItems,
+        address, contact, salesPerson, location, icPassport, tin
+    } = validation.value;
+
+    // Buyer identifiers go on the CUSTOMER as metadata, not on the invoice as
+    // custom fields: Stripe caps custom_fields at 4 and the three below already
+    // claim most of that, and these belong to the person rather than to one
+    // order. Metadata is also not printed on Stripe's hosted invoice, which
+    // suits an identifier the customer already knows and nobody else needs to
+    // read. Keys are added only when filled — writing an empty string would
+    // erase a value an earlier invoice captured for this customer.
+    const buyerMetadata = {};
+    if (icPassport) buyerMetadata.ic_passport = icPassport;
+    if (tin) buyerMetadata.tin = tin;
+    const hasBuyerMetadata = Object.keys(buyerMetadata).length > 0;
 
     // Stripe prints these above the line items. Named here rather than in
     // lib/invoiceInput.js because the labels are a Stripe presentation detail,
@@ -79,14 +95,25 @@ export default async function handler(req, res) {
             // BEFORE the invoice is finalized — finalizing snapshots the
             // customer's details onto the invoice, so an update afterwards
             // would not appear on the document the customer actually receives.
+            //
+            // Stripe merges the metadata keys it is handed rather than
+            // replacing the whole object, so sending only what this invoice
+            // captured leaves anything recorded earlier in place.
+            const updates = {};
             if (address) {
-                customer = await stripe.customers.update(customer.id, { address, name: customerName });
+                updates.address = address;
+                updates.name = customerName;
+            }
+            if (hasBuyerMetadata) updates.metadata = buyerMetadata;
+            if (Object.keys(updates).length > 0) {
+                customer = await stripe.customers.update(customer.id, updates);
             }
         } else {
             customer = await stripe.customers.create({
                 email: customerEmail,
                 name: customerName,
-                ...(address ? { address } : {})
+                ...(address ? { address } : {}),
+                ...(hasBuyerMetadata ? { metadata: buyerMetadata } : {})
             });
         }
 
@@ -135,7 +162,12 @@ export default async function handler(req, res) {
         // 3. Finalizing is what produces hosted_invoice_url — a draft has none.
         const finalized = await stripe.invoices.finalizeInvoice(invoice.id);
 
-        console.log(`[staff] invoice ${finalized.id} finalized for ${customerEmail} (${lineItems.length} line item(s))`);
+        // Whether a buyer identifier was captured, never which one or what it
+        // said: an IC/passport number and a TIN are personal data, and a log
+        // line is the easiest place for them to end up somewhere nothing is
+        // protecting them. The yes/no still answers "did that invoice get one".
+        console.log(`[staff] invoice ${finalized.id} finalized for ${customerEmail} `
+            + `(${lineItems.length} line item(s), buyer id captured: ${hasBuyerMetadata ? 'yes' : 'no'})`);
 
         return res.status(200).json({
             invoiceId: finalized.id,

@@ -742,3 +742,55 @@ describe('invoice customer-facing detail fields', () => {
         assert.equal(result.value.totalRm, 100, 'the money is untouched by any of this');
     });
 });
+
+describe('buyer identifiers (IC/passport and TIN)', () => {
+    const BASE = {
+        customerName: 'Aisyah',
+        customerEmail: 'aisyah@example.com',
+        lineItems: [{ description: 'Wall bed', unitAmount: 100 }]
+    };
+    const withExtra = (extra) => validateInvoiceInput({ ...BASE, ...extra });
+
+    test('both are captured and trimmed', () => {
+        const value = withExtra({ icPassport: '  900101-14-5533  ', tin: ' IG5544332211 ' }).value;
+        assert.equal(value.icPassport, '900101-14-5533');
+        assert.equal(value.tin, 'IG5544332211');
+    });
+
+    test('an invoice without them carries neither key', () => {
+        const value = withExtra({}).value;
+        for (const key of ['icPassport', 'tin']) {
+            assert.ok(!(key in value), `${key} must be absent, not empty`);
+        }
+    });
+
+    test('blank or non-string values are omitted rather than sent empty', () => {
+        // An empty metadata value would overwrite whatever an earlier invoice
+        // captured for this customer.
+        const value = withExtra({ icPassport: '   ', tin: 12345 }).value;
+        for (const key of ['icPassport', 'tin']) {
+            assert.ok(!(key in value), `${key} must be absent`);
+        }
+    });
+
+    test('over-length input is cut to 40 characters, never refused', () => {
+        const value = withExtra({ icPassport: 'A'.repeat(200), tin: 'B'.repeat(200) }).value;
+        assert.equal(value.icPassport.length, 40);
+        assert.equal(value.tin.length, 40);
+    });
+
+    test('unfamiliar formats are kept as typed', () => {
+        // Passport and TIN formats vary by country and by taxpayer type;
+        // rejecting one we do not recognise would block an invoice over a
+        // field that carries no money.
+        for (const id of ['X1234567', 'C 01 234 567 89', 'e-Invoice/EI00000000010']) {
+            assert.equal(withExtra({ icPassport: id }).value.icPassport, id);
+        }
+    });
+
+    test('neither can make a valid invoice invalid', () => {
+        const result = withExtra({ icPassport: { nope: true }, tin: ['also nope'] });
+        assert.equal(result.ok, true, result.ok ? '' : result.error);
+        assert.equal(result.value.totalRm, 100, 'the money is untouched by either of them');
+    });
+});

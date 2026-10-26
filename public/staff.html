@@ -118,6 +118,21 @@
         <label for="contact">Contact number <span class="muted">— optional</span></label>
         <input type="text" id="contact" inputmode="tel" placeholder="012-345 6789">
 
+        <!-- Buyer identifiers for Malaysian e-invoice completeness. They print
+             on the MOCOF PDF and are stored against the customer in Stripe;
+             they are not sent as invoice custom fields, which Stripe caps at
+             four. No format is enforced — passport and TIN formats vary. -->
+        <div class="row" style="margin-top:12px;">
+          <div style="flex:1;">
+            <label for="icPassport" style="margin-top:0;">IC / Passport number <span class="muted">— optional</span></label>
+            <input type="text" id="icPassport" maxlength="40">
+          </div>
+          <div style="flex:1;">
+            <label for="tin" style="margin-top:0;">TIN number <span class="muted">— optional</span></label>
+            <input type="text" id="tin" maxlength="40">
+          </div>
+        </div>
+
         <!-- Printed as "Bill to" on the invoice. Everything here is optional;
              a blank field is simply left off the document. -->
         <label>Billing address <span class="muted">— optional</span></label>
@@ -293,7 +308,7 @@ function blankRow() {
 }
 
 function startNewInvoice() {
-  ['custName', 'custEmail', 'contact', 'salesPerson', 'location',
+  ['custName', 'custEmail', 'contact', 'icPassport', 'tin', 'salesPerson', 'location',
    'addrLine1', 'addrLine2', 'addrCity', 'addrPostcode', 'addrState']
     .forEach(function (id) { el(id).value = ''; });
   items = [blankRow()];
@@ -549,7 +564,8 @@ el('invoiceForm').addEventListener('submit', async function (e) {
     // rule, this just avoids posting a half-empty object for nothing.
     if (address.line1.trim() !== '') payload.address = address;
 
-    [['contact', 'contact'], ['salesPerson', 'salesPerson'], ['location', 'location']]
+    [['contact', 'contact'], ['salesPerson', 'salesPerson'], ['location', 'location'],
+     ['icPassport', 'icPassport'], ['tin', 'tin']]
       .forEach(function (pair) {
         var typed = el(pair[1]).value.trim();
         if (typed !== '') payload[pair[0]] = typed;
@@ -570,6 +586,8 @@ el('invoiceForm').addEventListener('submit', async function (e) {
       address: payload.address || null,
       salesPerson: payload.salesPerson || '',
       location: payload.location || '',
+      icPassport: payload.icPassport || '',
+      tin: payload.tin || '',
       invoiceNumber: r.data.invoiceNumber || r.data.invoiceId || '',
       hostedInvoiceUrl: r.data.hostedInvoiceUrl || '',
       // Stripe's own total, not a number re-derived in the browser, so the PDF
@@ -649,6 +667,11 @@ function buildInvoiceDocDefinition(inv) {
   }
   if (inv.customerEmail) billTo.push({ text: inv.customerEmail });
   if (inv.contact) billTo.push({ text: inv.contact });
+  // Labelled, unlike the lines above: a bare identifier string beneath an
+  // address reads as a mistake, and the customer's accountant needs to know
+  // which number is which.
+  if (inv.tin) billTo.push({ text: 'TIN: ' + inv.tin });
+  if (inv.icPassport) billTo.push({ text: 'IC/Passport: ' + inv.icPassport });
 
   var metaRows = [
     ['INVOICE NO.', inv.invoiceNumber],
