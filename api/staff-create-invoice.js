@@ -4,7 +4,7 @@
 // confirmed. Endpoint: POST /api/staff-create-invoice
 // Body: { customerName, customerEmail, currency,
 //         address?, contact?, salesPerson?, location?,
-//         icPassport?, tin?,
+//         icPassport?, tin?, installments?,
 //         lineItems: [{ description, quantity, unitAmount }] }
 // Env vars: STRIPE_SECRET_KEY, STAFF_*
 //
@@ -25,6 +25,7 @@
 import Stripe from 'stripe';
 import { requireStaffAuth } from '../lib/staffAuth.js';
 import { validateInvoiceInput } from '../lib/invoiceInput.js';
+import { computeInstallmentOptions } from '../lib/installment.js';
 
 const DAYS_UNTIL_DUE = 3;
 
@@ -67,6 +68,12 @@ export default async function handler(req, res) {
     // suits an identifier the customer already knows and nobody else needs to
     // read. Keys are added only when filled — writing an empty string would
     // erase a value an earlier invoice captured for this customer.
+    // Reference figures only, and read straight off the raw body rather than
+    // through validateInvoiceInput(): this is a display toggle, not a number,
+    // so it has no business in the function that gates the charge. Strictly
+    // `=== true`, so a stray string cannot switch it on.
+    const wantsInstallments = req.body.installments === true;
+
     const buyerMetadata = {};
     if (icPassport) buyerMetadata.ic_passport = icPassport;
     if (tin) buyerMetadata.tin = tin;
@@ -162,6 +169,11 @@ export default async function handler(req, res) {
         // 3. Finalizing is what produces hosted_invoice_url — a draft has none.
         const finalized = await stripe.invoices.finalizeInvoice(invoice.id);
 
+        const invoiceTotalRm = typeof finalized.total === 'number' ? finalized.total / 100 : null;
+        const installmentOptions = wantsInstallments && invoiceTotalRm !== null
+            ? computeInstallmentOptions(invoiceTotalRm)
+            : [];
+
         // Whether a buyer identifier was captured, never which one or what it
         // said: an IC/passport number and a TIN are personal data, and a log
         // line is the easiest place for them to end up somewhere nothing is
@@ -179,7 +191,13 @@ export default async function handler(req, res) {
             invoiceNumber: finalized.number,
             hostedInvoiceUrl: finalized.hosted_invoice_url,
             invoicePdf: finalized.invoice_pdf,
-            total: typeof finalized.total === 'number' ? finalized.total / 100 : null,
+            total: invoiceTotalRm,
+            // Printed on the branded PDF beside the balance due, never charged.
+            // Computed from the FINALIZED Stripe total — the same number the
+            // PDF prints as BALANCE DUE — so the two cannot disagree on the
+            // page they share. Omitted entirely when the staff member did not
+            // ask for it, or when Stripe returned no usable total.
+            ...(installmentOptions.length > 0 ? { installmentOptions } : {}),
             currency
         });
     } catch (err) {

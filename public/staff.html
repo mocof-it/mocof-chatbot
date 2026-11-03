@@ -60,6 +60,9 @@
   .ok { color: #0a7d3f; font-size: 13px; margin-top: 10px; }
   .muted { color: #777777; font-size: 12px; }
   .row { display: flex; gap: 8px; align-items: flex-start; }
+  .check { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; }
+  .check input[type="checkbox"] { width: 16px; flex: none; margin-top: 2px; padding: 0; }
+  .check label { margin: 0; font-weight: 600; }
   .row input.desc { flex: 1; }
   .row input.amt { width: 130px; }
   .lineitem input.desc { flex: 1; min-width: 0; }
@@ -159,6 +162,17 @@
         <div id="items"></div>
         <button type="button" class="ghost" id="addItem">+ Add product</button>
 
+        <!-- Reference figures printed on the PDF only. The invoice total and
+             the Stripe charge are the full price either way — the customer's
+             own bank is what splits their card charge into installments. -->
+        <div class="check">
+          <input type="checkbox" id="installments">
+          <div>
+            <label for="installments">Include installment options (bank credit card plans)</label>
+            <div class="muted">Prints a monthly-payment table on the PDF. Does not change what is charged.</div>
+          </div>
+        </div>
+
         <div class="summary hidden" id="summary"></div>
         <div class="total" id="total"></div>
 
@@ -217,6 +231,17 @@ var MOCOF_BANK = {
     'Acc: 320 539 4433',
     'Swift code: PBBEMYKLXXX'
   ]
+};
+
+/* Printed with the installment table. The banks are listed rather than chosen
+   from, because the rates are identical at every one of them — the customer
+   simply uses whichever card they hold. The note is the important half: it is
+   what makes clear that MOCOF is not financing anything. */
+var MOCOF_INSTALLMENT = {
+  heading: 'Installment options — via participating bank credit cards',
+  banks: 'Maybank, Standard Chartered, OCBC, UOB, BSN, HSBC, Alliance, Ambank, Affin, RHB',
+  note: 'Installment plans are provided and approved by your bank, subject to its terms. '
+      + 'The invoice balance above is payable in full; your bank converts it into monthly installments.'
 };
 
 var MOCOF_INVOICE_NOTES = [
@@ -311,6 +336,7 @@ function startNewInvoice() {
   ['custName', 'custEmail', 'contact', 'icPassport', 'tin', 'salesPerson', 'location',
    'addrLine1', 'addrLine2', 'addrCity', 'addrPostcode', 'addrState']
     .forEach(function (id) { el(id).value = ''; });
+  el('installments').checked = false;
   items = [blankRow()];
   renderItems();
   show(el('draftCard'), true);
@@ -547,7 +573,8 @@ el('invoiceForm').addEventListener('submit', async function (e) {
       customerName: el('custName').value,
       customerEmail: el('custEmail').value,
       currency: 'myr',
-      lineItems: lineItems
+      lineItems: lineItems,
+      installments: el('installments').checked
     };
 
     /* The optional, customer-facing fields. Sent only when filled: an empty
@@ -588,6 +615,9 @@ el('invoiceForm').addEventListener('submit', async function (e) {
       location: payload.location || '',
       icPassport: payload.icPassport || '',
       tin: payload.tin || '',
+      // Straight from the server, never recomputed here: the browser holds no
+      // rate table, exactly as it holds no price list.
+      installmentOptions: Array.isArray(r.data.installmentOptions) ? r.data.installmentOptions : [],
       invoiceNumber: r.data.invoiceNumber || r.data.invoiceId || '',
       hostedInvoiceUrl: r.data.hostedInvoiceUrl || '',
       // Stripe's own total, not a number re-derived in the browser, so the PDF
@@ -629,6 +659,12 @@ el('invoiceForm').addEventListener('submit', async function (e) {
 
 function formatMoney(n) {
   return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/* 0.025 -> "2.5%", 0.12 -> "12%". Trailing zeros are dropped because that is
+   how the banks print their own rate cards. */
+function formatPercent(rate) {
+  return String(Math.round(Number(rate) * 1000) / 10) + '%';
 }
 
 function formatDate(date) {
@@ -714,6 +750,50 @@ function buildInvoiceDocDefinition(inv) {
     cardColumn.push({ qr: inv.hostedInvoiceUrl, fit: 110 });
   } else {
     cardColumn.push({ text: 'Link unavailable — contact MOCOF.', style: 'payBody' });
+  }
+
+  /* Reference only, and deliberately built from what the SERVER sent: no rate
+     lives in this file, so a figure printed here cannot drift from the one the
+     endpoint computed. An invoice created without the option simply has no
+     section — an empty table with a heading would read as an error. */
+  var installmentBlocks = [];
+  var options = Array.isArray(inv.installmentOptions) ? inv.installmentOptions : [];
+  if (options.length > 0) {
+    var planRows = [[
+      { text: 'TERM', style: 'th' },
+      { text: 'INTEREST', style: 'th', alignment: 'right' },
+      { text: 'MONTHLY', style: 'th', alignment: 'right' }
+    ]];
+    options.forEach(function (plan) {
+      planRows.push([
+        { text: plan.months + ' months' },
+        // Stored as a decimal fraction; the percentage is a display concern,
+        // and toFixed would print "2.50%" where the bank's own table says 2.5%.
+        { text: formatPercent(plan.rate), alignment: 'right' },
+        { text: 'RM ' + formatMoney(plan.monthlyRm), alignment: 'right' }
+      ]);
+    });
+    installmentBlocks = [
+      {
+        margin: [0, 24, 0, 0],
+        stack: [
+          { text: MOCOF_INSTALLMENT.heading, style: 'payHeading', margin: [0, 0, 0, 6] },
+          {
+            table: { headerRows: 1, widths: ['*', 80, 90], body: planRows },
+            layout: {
+              fillColor: function (rowIndex) { return rowIndex === 0 ? '#222222' : null; },
+              hLineWidth: function (i, node) { return (i === 0 || i === node.table.body.length) ? 0 : 0.5; },
+              vLineWidth: function () { return 0; },
+              hLineColor: function () { return '#dddddd'; },
+              paddingTop: function () { return 4; },
+              paddingBottom: function () { return 4; }
+            }
+          },
+          { text: 'Participating banks: ' + MOCOF_INSTALLMENT.banks, style: 'note', margin: [0, 6, 0, 0] },
+          { text: MOCOF_INSTALLMENT.note, style: 'note', margin: [0, 4, 0, 0] }
+        ]
+      }
+    ];
   }
 
   return {
@@ -813,13 +893,14 @@ function buildInvoiceDocDefinition(inv) {
         ],
         columnGap: 24
       },
+    ].concat(installmentBlocks, [
       {
         margin: [0, 26, 0, 0],
         stack: MOCOF_INVOICE_NOTES.map(function (line) {
           return { text: line, style: 'note', margin: [0, 0, 0, 2] };
         })
       }
-    ]
+    ])
   };
 }
 
