@@ -916,7 +916,22 @@ function hasCabinetryIntent(message, history) {
 const PURCHASE_INTENT_INFO_NOUN = '(?:info|information|idea|quote|price|pricing|cost|estimate|detail|details|brochure|catalog|catalogue|list|link|address|number|photo|picture|image)';
 const PURCHASE_INTENT_BUY_VERB = '(?:buy|order|reserve|purchase|pay|book|place)';
 
-const PURCHASE_INTENT_PATTERN = new RegExp([
+// The clauses below are split into two groups on purpose, because this project
+// now needs TWO different answers to "does the customer want this?".
+//
+//   - Offering to reserve IN WORDS is cheap and friendly, and plain interest
+//     ("I want the Murano Queen") is reason enough for the bot to ask whether
+//     they would like to reserve it. That is what hasPurchaseIntent() answers.
+//   - Putting a PAYMENT BUTTON on screen is not cheap: it reads as a hard sell
+//     to somebody who has merely said which bed they like. That needs the
+//     customer to actually commit, which is what hasReservationCommitment()
+//     answers from the first group alone.
+//
+// One list of phrases, two predicates — so a new buy phrase cannot be added to
+// the soft offer and forgotten on the button, or the other way round.
+
+// Group 1: the customer is TRANSACTING. A payment button is warranted here.
+const RESERVATION_COMMITMENT_CLAUSES = [
     // "I want to buy", "I'd like to order", "I want to reserve"
     `\\b(?:want(?:s|ed)?|would\\s+like|'d\\s+like)\\s+to\\s+${PURCHASE_INTENT_BUY_VERB}\\b`,
     // "wanna" already carries the "to", so it gets its own clause.
@@ -924,11 +939,6 @@ const PURCHASE_INTENT_PATTERN = new RegExp([
     // "I want to get one" / "...to take the Murano". Permissive verbs, so the
     // object must not be informational — "want to get a quote" is not buying.
     `\\b(?:want(?:s|ed)?|wanna|would\\s+like|'d\\s+like)\\s+to\\s+(?:get|take|have)\\s+(?:it\\b|one\\b|this\\b|that\\b|(?:the|a|an|some)\\s+(?!${PURCHASE_INTENT_INFO_NOUN}\\b))`,
-    // "I want the Murano Single", "I'd like a Gioco Queen" — same object guard,
-    // which is what keeps "I want the price" and "I want a quote" out.
-    `\\bi\\s*(?:'d\\s+like|would\\s+like|want(?:s|ed)?)\\s+(?:the|a|an)\\s+(?!${PURCHASE_INTENT_INFO_NOUN}\\b)`,
-    // "I want it", "I want this one", "I'd like that"
-    `\\bi\\s*(?:'d\\s+like|would\\s+like|want(?:s|ed)?)\\s+(?:it|this|that|these|those)\\b`,
     // "I'll take it", "I'll get it", "I will buy it"
     `\\bi\\s*(?:'ll|\\s+will)\\s+(?:take|get|buy|order|reserve|purchase|have)\\b`,
     // "can I buy", "how do I order", "how do I reserve"
@@ -945,7 +955,29 @@ const PURCHASE_INTENT_PATTERN = new RegExp([
     '\\bsign\\s+me\\s+up\\b',
     // "I'm ready to buy/order/reserve"
     `\\b(?:i'?m|i\\s+am)\\s+ready\\s+to\\s+${PURCHASE_INTENT_BUY_VERB}\\b`
-].join('|'), 'i');
+];
+
+// Group 2: the customer is INTERESTED — they have settled on a product, or are
+// pointing at one, without saying anything about buying it. Enough for the bot
+// to invite a reservation in conversation; deliberately NOT enough for a
+// button. These two clauses are the entire difference between the predicates,
+// and "I want the Murano Queen" answered with a checkout prompt is the bug
+// that separated them.
+const PRODUCT_INTEREST_CLAUSES = [
+    // "I want the Murano Single", "I'd like a Gioco Queen" — the object guard
+    // is what keeps "I want the price" and "I want a quote" out.
+    `\\bi\\s*(?:'d\\s+like|would\\s+like|want(?:s|ed)?)\\s+(?:the|a|an)\\s+(?!${PURCHASE_INTENT_INFO_NOUN}\\b)`,
+    // "I want it", "I want this one", "I'd like that"
+    `\\bi\\s*(?:'d\\s+like|would\\s+like|want(?:s|ed)?)\\s+(?:it|this|that|these|those)\\b`
+];
+
+const RESERVATION_COMMITMENT_PATTERN = new RegExp(RESERVATION_COMMITMENT_CLAUSES.join('|'), 'i');
+
+// Unchanged in meaning: still every clause, commitment and interest alike.
+// Alternation order does not affect .test(), which is the only way either of
+// these patterns is ever used.
+const PURCHASE_INTENT_PATTERN = new RegExp(
+    [...RESERVATION_COMMITMENT_CLAUSES, ...PRODUCT_INTEREST_CLAUSES].join('|'), 'i');
 
 // A short affirmative reply ("yes", "sure", "ok let's do it"), anchored at the
 // start of the message.
@@ -997,6 +1029,46 @@ function hasPurchaseIntent(message, history) {
         // assistant turn actually being a reservation invite, so a bare "yes" in
         // an unrelated context (e.g. "Yes, the Murano King" answering a model
         // choice) does not falsely trigger it.
+        if (AFFIRMATIVE_REPLY_PATTERN.test(t.content)) {
+            const prev = turns[i - 1];
+            if (prev && prev.role === 'assistant' && prev.content && RESERVATION_INVITE_PATTERN.test(prev.content)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// The stricter sibling of hasPurchaseIntent(): true only when the customer has
+// actually COMMITTED, which is the bar for showing payment options.
+//
+// Same shape, same history window, same affirmative-after-invite path — the one
+// difference is the pattern, which omits PRODUCT_INTEREST_CLAUSES. That is the
+// whole point: "I want the Murano Queen" still lets the bot offer a reservation
+// in words (the system prompt is untouched), but the deposit buttons wait for
+// "I want to BUY the Murano Queen", "I'll take it", "reserve it", "pay the
+// deposit" — or a plain "yes" to the bot's own reservation invitation.
+//
+// Because api/create-deposit.js re-derives its basis through the same
+// getDepositBasisFromContext(), tightening this predicate tightens the CHARGE
+// path identically. That is intended: a customer who never asked to reserve
+// cannot have a deposit created for them either, whatever the client posts.
+function hasReservationCommitment(message, history) {
+    const priorTurns = Array.isArray(history) ? history.slice(-10) : [];
+    const turns = [...priorTurns, { role: 'user', content: message }];
+
+    for (let i = 0; i < turns.length; i++) {
+        const t = turns[i];
+        if (!t || t.role !== 'user' || !t.content) continue;
+
+        // Explicit transaction phrasing ("I'll take it", "reserve the Murano").
+        if (RESERVATION_COMMITMENT_PATTERN.test(t.content)) return true;
+
+        // Saying "yes" to "Would you like to reserve it with a deposit?" IS the
+        // commitment — it is the customer accepting the exact offer the bot just
+        // made, which is precisely the soft-offer-then-commit flow this split
+        // was built to support. Identical gating to hasPurchaseIntent(), so a
+        // bare "yes" in an unrelated context still counts for nothing.
         if (AFFIRMATIVE_REPLY_PATTERN.test(t.content)) {
             const prev = turns[i - 1];
             if (prev && prev.role === 'assistant' && prev.content && RESERVATION_INVITE_PATTERN.test(prev.content)) {
@@ -1290,23 +1362,32 @@ function describeDepositSuppression(message, history) {
         const priced = extractSelectedWallBedPricing(history, message);
         return {
             modelLabel: priced ? priced.label : null,
-            purchaseIntent: hasPurchaseIntent(message, history)
+            // Both, because the interesting case is now the GAP between them:
+            // interest without commitment is the designed quiet path, while
+            // commitment without a button is a bug.
+            purchaseIntent: hasPurchaseIntent(message, history),
+            reservationCommitment: hasReservationCommitment(message, history)
         };
     } catch {
-        return { modelLabel: null, purchaseIntent: false };
+        return { modelLabel: null, purchaseIntent: false, reservationCommitment: false };
     }
 }
 
 function logDepositSuppressed(reason, message, history) {
     try {
-        const { modelLabel, purchaseIntent } = describeDepositSuppression(message, history);
+        const { modelLabel, purchaseIntent, reservationCommitment } = describeDepositSuppression(message, history);
         const suffix = modelLabel ? ` | model: ${modelLabel}` : '';
 
         // The one case worth raising the severity for: the customer named a
-        // specific model AND said they want it, and still got no button. That is
-        // the "should probably have offered and didn't" shape, which is what
+        // specific model AND asked to reserve it, and still got no button. That
+        // is the "should probably have offered and didn't" shape, which is what
         // every deposit bug in this project has looked like so far.
-        if (modelLabel && purchaseIntent) {
+        //
+        // Gated on COMMITMENT, not interest. Interest alone is now withheld on
+        // purpose, and it is the single most common shape a conversation takes —
+        // escalating it would turn the designed path into a constant stream of
+        // errors and bury the real ones. It still logs below, as a warning.
+        if (modelLabel && reservationCommitment) {
             console.error(`[deposit] WITHHELD despite buy intent: ${reason}${suffix}`);
             return;
         }
@@ -1401,7 +1482,16 @@ function getDepositBasisFromContext(message, history) {
     // keyword check, so the button was withheld even though the estimate was on
     // screen. Gating on "estimate was presented" preserves the invariant that the
     // button never PRECEDES the price text, without depending on phrasing.
-    if (hasPriceIntent(message, history) || cabinetryEstimatePresented(history)) {
+    //
+    // The commitment gate is additional, not a replacement: this path had none,
+    // because assembling a grand total was taken to be buy signal enough on its
+    // own. It is not — a customer can measure their wall purely to find out
+    // what the room would cost. The price text is still produced either way
+    // (buildCabinetryEstimateBlock() is independent of this function), so the
+    // invariant that matters is preserved and strengthened: the button is now a
+    // strict subset of the turns that show a price, never the other way round.
+    if ((hasPriceIntent(message, history) || cabinetryEstimatePresented(history))
+        && hasReservationCommitment(message, history)) {
         const est = getCabinetryEstimateFromContext(message, history);
         if (est && !est.blocked && est.grandTotal !== null && typeof est.grandTotal !== 'undefined') {
             return {
@@ -1440,10 +1530,11 @@ function getDepositBasisFromContext(message, history) {
         // at all, so the catalog's lack of structured prices stops being the
         // reason a customer can't put money down.
         //
-        // Still gated on purchase intent, exactly like the wall-bed path above:
-        // asking about a sofa must no more produce a payment button than asking
-        // about a wall bed does.
-        if (hasPurchaseIntent(message, history)) {
+        // Still gated exactly like the wall-bed path above, and tightened with
+        // it: asking about a sofa must no more produce a payment button than
+        // asking about a wall bed does, so "I want that sofa" cannot keep
+        // showing buttons after "I want the Murano Queen" stopped.
+        if (hasReservationCommitment(message, history)) {
             return {
                 type: DEPOSIT_TYPE_RESERVATION,
                 wallBedModelLabel: null,
@@ -1468,13 +1559,14 @@ function getDepositBasisFromContext(message, history) {
     // A priced model is not by itself a reason to ask for money. "Is there a
     // Murano Single?" resolves a specific model and its price, and used to be
     // answered with a deposit button — an availability question met with a
-    // checkout prompt. The customer must have signalled they actually want it.
+    // checkout prompt.
     //
-    // Only this path needs the check. The cabinetry path above already requires
-    // an explicit price request PLUS the customer measuring their own wall over
-    // several turns, which is a far stronger buy signal than any phrase match.
-    if (!hasPurchaseIntent(message, history)) {
-        logDepositSuppressed('model resolved but no purchase-intent signal', message, history);
+    // Naming the bed is not enough either. "I want the Murano Queen" settles
+    // which model, not whether they are buying today, and answering it with
+    // payment options reads as a hard sell. The bot still offers to reserve in
+    // words; the buttons wait for the customer to take that offer up.
+    if (!hasReservationCommitment(message, history)) {
+        logDepositSuppressed('model resolved but no reservation commitment', message, history);
         return null;
     }
 
@@ -1775,6 +1867,8 @@ export {
     hasCabinetryIntent,
     hasPurchaseIntent,
     PURCHASE_INTENT_PATTERN,
+    hasReservationCommitment,
+    RESERVATION_COMMITMENT_PATTERN,
     getDepositBasisFromContext,
     DEPOSIT_TYPE_WITH_CABINETRY,
     DEPOSIT_TYPE_WALLBED_ONLY,

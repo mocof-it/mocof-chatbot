@@ -49,6 +49,9 @@ import {
     getDepositBasisFromContext,
     hasCabinetryIntent,
     hasPurchaseIntent,
+    hasReservationCommitment,
+    PURCHASE_INTENT_PATTERN,
+    RESERVATION_COMMITMENT_PATTERN,
     hasPriceIntent,
     DEPOSIT_TYPE_WITH_CABINETRY,
     DEPOSIT_TYPE_WALLBED_ONLY,
@@ -333,8 +336,21 @@ describe('cabinetry context extraction -> pricing -> price guardrail chain', () 
     // the deposit amount is checked against the SAME verified grand total
     // as the tests above, rather than a second hand-computed number that
     // could quietly drift from it.
-    test('computeDepositOffer returns the full offer once a grand total is actually being shown', () => {
-        const offer = computeDepositOffer(message, history);
+    //
+    // The estimate alone no longer produces the button: a customer can measure
+    // their wall purely to find out what the room would cost. The fixture is
+    // carried one turn further, to the bot making its reservation offer and the
+    // customer accepting it — which is the flow the buttons now wait for.
+    test('computeDepositOffer returns the full offer once the customer accepts the reservation offer', () => {
+        const accepted = [
+            ...history,
+            { role: 'user', content: message },
+            { role: 'assistant', content: 'Your grand total is RM 38,300.11. Would you like to reserve it with a 10% deposit?' }
+        ];
+        assert.equal(computeDepositOffer(message, history), null,
+            'the estimate on its own must not put a button on screen');
+
+        const offer = computeDepositOffer('yes', accepted);
         assert.ok(offer, 'expected a non-null deposit offer');
         assert.equal(offer.wallBedModelLabel, 'Murano Queen Sofa');
         assert.equal(offer.grandTotal, 38300.11);
@@ -1060,14 +1076,32 @@ describe('wall-bed-only deposit path', () => {
         { role: 'assistant', content: 'Yes — the Murano Queen is one of our vertical wall beds.' }
     ];
 
+    // Settling on a model is interest, not a commitment: the bot offers to
+    // reserve in words here, and the buttons wait. See WALLBED_COMMITTED.
     const WALLBED_ONLY = [
         ...INFO_ONLY,
         { role: 'user', content: 'I want the Murano Queen' },
         { role: 'assistant', content: 'Great choice — the Murano Queen is RM 23,698.11 sale.' }
     ];
 
+    // The same conversation once the customer actually asks to reserve.
+    const WALLBED_COMMITTED = [
+        ...WALLBED_ONLY,
+        { role: 'user', content: 'I want to buy it' },
+        { role: 'assistant', content: 'Great — a 10% deposit reserves it.' }
+    ];
+
+    // The split itself: identical conversation, one extra turn, and only the
+    // second one earns a button.
+    test('naming the bed offers nothing until the customer asks to reserve it', () => {
+        assert.equal(getDepositBasisFromContext('How much is it?', WALLBED_ONLY), null,
+            '"I want the Murano Queen" is interest, not a commitment');
+        assert.ok(getDepositBasisFromContext('How much is it?', WALLBED_COMMITTED),
+            'the same fixture plus "I want to buy it" must offer');
+    });
+
     test('offers a deposit on the wall bed sale price when cabinetry never came up', () => {
-        const basis = getDepositBasisFromContext('How much is it?', WALLBED_ONLY);
+        const basis = getDepositBasisFromContext('How much is it?', WALLBED_COMMITTED);
         assert.ok(basis, 'expected a deposit basis');
         assert.equal(basis.type, DEPOSIT_TYPE_WALLBED_ONLY);
         assert.equal(basis.wallBedModelLabel, 'Murano Queen');
@@ -1083,7 +1117,7 @@ describe('wall-bed-only deposit path', () => {
     });
 
     test('computeDepositOffer surfaces the type and a 10% amount', () => {
-        const offer = computeDepositOffer('How much is it?', WALLBED_ONLY);
+        const offer = computeDepositOffer('How much is it?', WALLBED_COMMITTED);
         assert.ok(offer);
         assert.equal(offer.depositType, DEPOSIT_TYPE_WALLBED_ONLY);
         assert.equal(offer.depositPercent, DEPOSIT_PERCENT);
@@ -1091,13 +1125,13 @@ describe('wall-bed-only deposit path', () => {
     });
 
     // Price wording is still not required on this path — the bed's sale price is
-    // a fixed catalog figure. What IS required is purchase intent, so this
-    // fixture supplies it without ever saying "how much".
-    test('does not require an explicit price question, only purchase intent', () => {
+    // a fixed catalog figure. What IS required is a reservation commitment, so
+    // this fixture supplies it without ever saying "how much".
+    test('does not require an explicit price question, only a commitment', () => {
         assert.equal(hasPriceIntent('I will take it', WALLBED_ONLY), false,
             'fixture must genuinely contain no price wording');
         const basis = getDepositBasisFromContext('I will take it', WALLBED_ONLY);
-        assert.ok(basis, 'purchase intent without a price question should still offer');
+        assert.ok(basis, 'a commitment without a price question should still offer');
         assert.equal(basis.type, DEPOSIT_TYPE_WALLBED_ONLY);
     });
 
@@ -1161,7 +1195,7 @@ describe('wall-bed-only deposit path', () => {
             { role: 'user', content: '11ft' },
             { role: 'assistant', content: 'And the total width of the wall, in feet?' }
         ];
-        const basis = getDepositBasisFromContext('10ft', history);
+        const basis = getDepositBasisFromContext('10ft, I want to buy it', history);
         assert.ok(basis);
         assert.equal(basis.type, DEPOSIT_TYPE_WITH_CABINETRY);
 
@@ -1280,10 +1314,10 @@ describe('deposit "Cabinets" Yes/No mapping', () => {
         const wallbedOnly = getDepositBasisFromContext('How much is it?', [
             { role: 'user', content: 'Do you have a Murano Queen?' },
             { role: 'assistant', content: 'Yes — the Murano Queen is available.' },
-            { role: 'user', content: 'I want the Murano Queen' },
+            { role: 'user', content: 'I want to buy the Murano Queen' },
             { role: 'assistant', content: 'Great — it is RM 23,698.11 sale.' }
         ]);
-        const withCabinetry = getDepositBasisFromContext('10ft', [
+        const withCabinetry = getDepositBasisFromContext('10ft, I want to buy it', [
             { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' },
             { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
             { role: 'user', content: '11ft' },
@@ -1545,11 +1579,13 @@ describe('deposit offer trigger', () => {
         { role: 'assistant', content: 'Yes — the Murano Queen is RM 19,102.22 retail | RM 14,371.55 sale.' }
     ];
 
-    // The same conversation, once the customer says they actually want it.
+    // The same conversation, carried to the point where the bot has offered to
+    // reserve the bed. Saying which model they want is not enough on its own;
+    // "Sounds good" below is the customer accepting THIS offer, which is.
     const PLAIN_WALLBED = [
         ...PLAIN_WALLBED_INFO,
         { role: 'user', content: 'I want the Murano Queen' },
-        { role: 'assistant', content: 'Great choice.' }
+        { role: 'assistant', content: 'Great choice — would you like to reserve it with a 10% deposit?' }
     ];
 
     // (a) the new behaviour
@@ -1602,7 +1638,7 @@ describe('deposit offer trigger', () => {
             { role: 'user', content: '11ft' },
             { role: 'assistant', content: 'And the total width of the wall, in feet?' }
         ];
-        const offer = computeDepositOffer('10ft', done);
+        const offer = computeDepositOffer('10ft, I want to buy it', done);
         assert.ok(offer);
         assert.equal(offer.depositType, DEPOSIT_TYPE_WITH_CABINETRY);
 
@@ -1760,10 +1796,175 @@ describe('hasPurchaseIntent', () => {
 });
 
 
-// ── Deposit offers require purchase intent (PART B) ─────────────
-// The regression: "Is there a Murano Single?" returned a priced model, and a
-// priced model alone used to be enough to render a payment button.
-describe('deposit offer requires purchase intent', () => {
+// ── The interest / commitment split ─────────────────────────────
+// Two predicates over one list of phrases. hasPurchaseIntent() answers "may the
+// bot OFFER to reserve, in words?" and is deliberately eager; this one answers
+// "may a PAYMENT BUTTON appear?" and is deliberately not. The gap between them
+// is the whole feature: a customer saying which bed they like gets a friendly
+// offer, not a checkout prompt.
+describe('hasReservationCommitment', () => {
+
+    // Explicit transaction phrasing. Every one of these is also purchase
+    // intent — commitment is a strict subset, asserted below.
+    const COMMIT = [
+        'I want to buy the Murano Queen',
+        'I want to order the Murano',
+        'I want to reserve',
+        "I'd like to purchase the Gioco Queen",
+        'wanna buy it',
+        "I'll take it",
+        "I'll get it",
+        'I will buy it',
+        'can I buy it',
+        'can I buy this',
+        'Can I reserve the Murano Queen?',
+        'how do I buy one',
+        'How do I reserve?',
+        'how do I order',
+        "let's reserve",
+        "let's reserve it",
+        "let's proceed",
+        'reserve it',
+        'reserve the Murano Queen',
+        'book it',
+        'put down a deposit',
+        'pay the deposit',
+        'sign me up',
+        "I'm ready to buy",
+        "I'm ready to order"
+    ];
+
+    // The phrases this predicate exists to EXCLUDE. Each is still purchase
+    // intent — the bot keeps inviting a reservation — but none of them is the
+    // customer asking to pay, and each used to produce buttons.
+    const INTEREST_ONLY = [
+        'I want the Murano Queen',
+        'I want a Murano Queen',
+        "I'd like the Murano Queen",
+        'I would like the Gioco Single',
+        'I want it',
+        'I want this one',
+        "I'd like that",
+        'I want these'
+    ];
+
+    // Neither: informational, and already excluded from both predicates.
+    const NEITHER = [
+        'do you have a Murano Single',
+        'is there a Murano Single',
+        'tell me about the Murano Single',
+        'how much is the Murano Single',
+        'I want to know more',
+        'I want to see the Murano Single',
+        'I want to get a quote',
+        'I want the price',
+        'I want a quote',
+        'I like that one',
+        'Sounds good'
+    ];
+
+    for (const phrase of COMMIT) {
+        test(`is a commitment: "${phrase}"`, () => {
+            assert.equal(hasReservationCommitment(phrase, []), true);
+        });
+    }
+
+    for (const phrase of INTEREST_ONLY) {
+        test(`is interest, not a commitment: "${phrase}"`, () => {
+            assert.equal(hasReservationCommitment(phrase, []), false, 'must not earn a button');
+            assert.equal(hasPurchaseIntent(phrase, []), true, 'but the soft offer must still fire');
+        });
+    }
+
+    for (const phrase of NEITHER) {
+        test(`is neither: "${phrase}"`, () => {
+            assert.equal(hasReservationCommitment(phrase, []), false);
+            assert.equal(hasPurchaseIntent(phrase, []), false);
+        });
+    }
+
+    // The structural property, checked over every phrase at once rather than
+    // trusted: anything that earns a button must also have cleared the softer
+    // gate. If these ever diverged, a customer could be shown payment options
+    // the bot was never allowed to mention.
+    test('commitment is a strict subset of purchase intent', () => {
+        for (const phrase of [...COMMIT, ...INTEREST_ONLY, ...NEITHER]) {
+            if (hasReservationCommitment(phrase, [])) {
+                assert.equal(hasPurchaseIntent(phrase, []), true,
+                    `"${phrase}" earns a button but not the soft offer`);
+            }
+        }
+    });
+
+    test('the two patterns differ by exactly the interest clauses', () => {
+        for (const phrase of INTEREST_ONLY) {
+            assert.equal(PURCHASE_INTENT_PATTERN.test(phrase), true, phrase);
+            assert.equal(RESERVATION_COMMITMENT_PATTERN.test(phrase), false, phrase);
+        }
+        for (const phrase of COMMIT) {
+            assert.equal(RESERVATION_COMMITMENT_PATTERN.test(phrase), true, phrase);
+        }
+    });
+
+    // The flow the split is designed around: the bot invites, the customer
+    // accepts. A bare "yes" carries no buy words at all, so without this path
+    // accepting the bot's own offer would never produce the button.
+    test('an affirmative reply to the reservation invite is a commitment', () => {
+        const invited = [
+            { role: 'user', content: 'I want the Murano Queen' },
+            { role: 'assistant', content: 'Would you like to reserve your Murano Queen with a 10% deposit?' }
+        ];
+        for (const reply of ['yes', 'yeah', 'ok', 'sure', 'please', 'go ahead', 'Sounds good', 'proceed']) {
+            assert.equal(hasReservationCommitment(reply, invited), true, 'after an invite: ' + reply);
+        }
+    });
+
+    test('the same affirmative after a NON-invite is not a commitment', () => {
+        // Otherwise "Yes, the Murano King" answering a model question would put
+        // a payment button on screen.
+        for (const assistantTurn of [
+            'We recommend the Murano Queen for that room.',
+            'Which would you prefer, the Murano Queen or the Murano King?',
+            'Would you like to visit our showroom?'
+        ]) {
+            assert.equal(hasReservationCommitment('yes', [{ role: 'assistant', content: assistantTurn }]), false,
+                'after: ' + assistantTurn);
+        }
+    });
+
+    test('scans recent user turns, not just the current message', () => {
+        const history = [
+            { role: 'user', content: "I'll take the Murano Queen" },
+            { role: 'assistant', content: 'Great choice.' }
+        ];
+        assert.equal(hasReservationCommitment('what colours does it come in?', history), true,
+            'a commitment made earlier still stands');
+    });
+
+    test('ignores assistant turns', () => {
+        // The bot talking about reserving is not the customer asking to.
+        const history = [
+            { role: 'assistant', content: 'Would you like to reserve it with a 10% deposit?' },
+            { role: 'assistant', content: "Let's reserve the Murano Queen for you." }
+        ];
+        assert.equal(hasReservationCommitment('hmm', history), false);
+    });
+
+    test('a missing or malformed history is not a commitment', () => {
+        for (const history of [undefined, null, [], 'nope', [null], [{ role: 'user' }]]) {
+            assert.equal(hasReservationCommitment('hello', history), false, JSON.stringify(history));
+        }
+    });
+});
+
+
+// ── Deposit offers require a reservation commitment (PART B) ────
+// The first regression: "Is there a Murano Single?" returned a priced model,
+// and a priced model alone used to be enough to render a payment button.
+// The second: naming the model ("I want the Murano Single") was then enough,
+// which met a customer choosing a bed with a checkout prompt. The bar is now
+// the customer asking to reserve, or accepting the bot's offer to.
+describe('deposit offer requires a reservation commitment', () => {
 
     const PRICED = [
         { role: 'user', content: 'Is there a Murano Single?' },
@@ -1775,12 +1976,24 @@ describe('deposit offer requires purchase intent', () => {
         assert.equal(getDepositBasisFromContext('Is there a Murano Single?', PRICED), null);
     });
 
-    // Pins that the fixture is otherwise complete — the null above is caused by
-    // the intent gate, not by the model failing to resolve. Without this the
-    // test could pass for entirely the wrong reason.
-    test('the same fixture DOES offer once intent is expressed', () => {
-        const offer = computeDepositOffer('I want the Murano Single', PRICED);
-        assert.ok(offer, 'purchase intent should unlock the offer');
+    // Interest is the in-between case the split exists for: enough for the bot
+    // to offer a reservation in words, not enough for a button.
+    test('naming the model is interest, and still offers nothing', () => {
+        for (const msg of ['I want the Murano Single', 'I want a Murano Single',
+                           "I'd like the Murano Single", 'I want it']) {
+            assert.equal(hasPurchaseIntent(msg, PRICED), true,
+                'the soft offer must still fire for: ' + msg);
+            assert.equal(computeDepositOffer(msg, PRICED), null,
+                'but no button for: ' + msg);
+        }
+    });
+
+    // Pins that the fixture is otherwise complete — the nulls above are caused
+    // by the commitment gate, not by the model failing to resolve. Without this
+    // the tests could pass for entirely the wrong reason.
+    test('the same fixture DOES offer once the customer commits', () => {
+        const offer = computeDepositOffer('I want to buy the Murano Single', PRICED);
+        assert.ok(offer, 'a commitment should unlock the offer');
         assert.equal(offer.depositType, DEPOSIT_TYPE_WALLBED_ONLY);
         assert.equal(offer.wallBedModelLabel, 'Murano Single');
 
@@ -1801,10 +2014,12 @@ describe('deposit offer requires purchase intent', () => {
         assert.equal(offer.depositType, DEPOSIT_TYPE_WALLBED_ONLY);
     });
 
-    // PART B explicitly leaves this path alone: assembling a cabinetry grand
-    // total already requires a price request plus the customer's own wall
-    // measurements, which is a stronger buy signal than any phrase match.
-    test('the cabinetry path still offers without an explicit buy phrase', () => {
+    // This path used to be exempt, on the reasoning that measuring your own
+    // wall is a strong enough buy signal by itself. It is not — a customer can
+    // measure a room purely to find out what it would cost — so the commitment
+    // gate now applies here too. The PRICE TEXT is unaffected either way; it is
+    // only the button that waits.
+    test('the cabinetry path also waits for a commitment now', () => {
         const history = [
             { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' },
             { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
@@ -1814,8 +2029,23 @@ describe('deposit offer requires purchase intent', () => {
         assert.equal(hasPurchaseIntent('10ft', history), false,
             'fixture must contain no buy wording, or this proves nothing');
 
-        const offer = computeDepositOffer('10ft', history);
-        assert.ok(offer, 'cabinetry path must be unaffected by the new gate');
+        // The estimate is real and the breakdown is still injected into the
+        // prompt — the customer does see their price.
+        const est = getCabinetryEstimateFromContext('10ft', history);
+        assert.ok(est && !est.blocked && est.grandTotal > 0, 'the estimate itself still resolves');
+        assert.match(buildCabinetryEstimateBlock('10ft', history), /GRAND TOTAL/,
+            'the price text must still reach the prompt');
+
+        assert.equal(computeDepositOffer('10ft', history), null,
+            'but a measured wall is not a request to reserve');
+
+        const accepted = [
+            ...history,
+            { role: 'user', content: '10ft' },
+            { role: 'assistant', content: 'Grand total RM 38,300.11. Would you like to reserve it with a deposit?' }
+        ];
+        const offer = computeDepositOffer('yes', accepted);
+        assert.ok(offer, 'accepting the offer must produce the button');
         assert.equal(offer.depositType, DEPOSIT_TYPE_WITH_CABINETRY);
     });
 });
@@ -2053,7 +2283,7 @@ describe('depositTypeLabel — single source shared with the Sheet column', () =
             { role: 'user', content: 'Do you have a Murano Queen?' },
             { role: 'assistant', content: 'Yes — the Murano Queen is RM 14,371.55 sale.' }
         ]);
-        const cab = getDepositBasisFromContext('10ft', [
+        const cab = getDepositBasisFromContext('10ft, I want to buy it', [
             { role: 'user', content: 'Murano Queen Sofa with side cabinets, how much in total?' },
             { role: 'assistant', content: 'What is the total height of the wall, in feet?' },
             { role: 'user', content: '11ft' },
@@ -2239,19 +2469,31 @@ describe('deposit suppression diagnostics', () => {
         assert.match(warns[0], /^\[deposit\] suppressed: no specific wall bed model resolved$/);
     });
 
-    test('a priced model without buy intent warns and names the model', () => {
+    test('a priced model without a commitment warns and names the model', () => {
         const { result, warns, errors } = capture('Is there a Murano Single?', PRICED);
         assert.equal(result, null);
         assert.equal(errors.length, 0);
         assert.equal(warns.length, 1);
-        assert.match(warns[0], /\[deposit\] suppressed: model resolved but no purchase-intent signal/);
+        assert.match(warns[0], /\[deposit\] suppressed: model resolved but no reservation commitment/);
         assert.match(warns[0], /\| model: Murano Single/);
+    });
+
+    // The reason the alarm below is gated on COMMITMENT and not on interest:
+    // interest without a button is now the designed path, and it is the single
+    // most common shape a conversation takes. Escalating it would bury the real
+    // alarms under a constant stream of errors.
+    test('plain interest is a quiet warn, never the WITHHELD alarm', () => {
+        const { result, warns, errors } = capture('I want the Murano Single', PRICED);
+        assert.equal(result, null, 'interest alone still offers nothing');
+        assert.equal(errors.length, 0, 'the designed path must not raise an error');
+        assert.equal(warns.length, 1, 'but it is still visible as a warning');
+        assert.match(warns[0], /no reservation commitment/);
     });
 
     // The alarm. A customer who named a model AND said they want it, getting
     // nothing, is the shape every deposit bug in this project has taken.
-    test('a ceiling conflict with buy intent raises the WITHHELD alarm', () => {
-        const { result, warns, errors } = capture('I want the Murano Queen', [
+    test('a ceiling conflict with a commitment raises the WITHHELD alarm', () => {
+        const { result, warns, errors } = capture('I want to buy the Murano Queen', [
             { role: 'user', content: 'My ceiling is 7ft, do you have a Murano Queen?' },
             { role: 'assistant', content: 'What is your ceiling height?' },
             { role: 'user', content: '7ft' },
@@ -2278,7 +2520,7 @@ describe('deposit suppression diagnostics', () => {
     // A produced offer is not a suppression, so it must be silent on both
     // channels — otherwise the logs report a problem that did not happen.
     test('a successful offer logs nothing', () => {
-        const { result, warns, errors } = capture('I want the Murano Single', PRICED);
+        const { result, warns, errors } = capture('I want to buy the Murano Single', PRICED);
         assert.ok(result, 'fixture must actually produce an offer');
         assert.equal(result.type, DEPOSIT_TYPE_WALLBED_ONLY);
         assert.deepEqual(warns, []);
@@ -2290,7 +2532,7 @@ describe('deposit suppression diagnostics', () => {
     test('logging changed no return value at any gate', () => {
         assert.equal(capture('hi', []).result, null);
         assert.equal(capture('Is there a Murano Single?', PRICED).result, null);
-        assert.ok(capture('I want the Murano Single', PRICED).result);
+        assert.ok(capture('I want to buy the Murano Single', PRICED).result);
     });
 });
 
@@ -2557,7 +2799,7 @@ describe('deposit amount options', () => {
         { role: 'user', content: 'Is there a Murano Single?' },
         { role: 'assistant', content: 'Yes — the Murano Single is RM 16,083.40 retail | RM 12,062.55 sale.' }
     ];
-    const BED_ONLY_MESSAGE = 'I want the Murano Single';
+    const BED_ONLY_MESSAGE = 'I want to buy the Murano Single';
     const bedOnlyTotal = () => WALLBED_MODEL_PRICING.find(m => m.label === 'Murano Single').sale;
 
     // Worked example 4 — the cabinetry fixture whose grand total (RM 38,300.11)
@@ -2568,7 +2810,7 @@ describe('deposit amount options', () => {
         { role: 'user', content: '11ft' },
         { role: 'assistant', content: 'Got it. What is the total width of the wall, in feet?' }
     ];
-    const CAB_MESSAGE = '10ft';
+    const CAB_MESSAGE = '10ft, I want to buy it';
 
     test('the allowed fixed amounts are exactly the four agreed values, and frozen', () => {
         assert.deepEqual([...ALLOWED_FIXED_DEPOSITS], [1500, 2500, 3500, 4500]);
@@ -2811,7 +3053,10 @@ describe('product reservation deposits', () => {
         { role: 'user', content: 'Do you have the Solaris Sofa?' },
         { role: 'assistant', content: 'Yes — the Solaris Sofa is one of our premium sofas.' }
     ];
-    const SOFA_MESSAGE = 'I want the Solaris Sofa';
+    // A commitment, not merely interest: "I want the Solaris Sofa" settles
+    // which sofa, and the buttons now wait for the customer to ask to reserve
+    // it — the same rule as the wall bed path.
+    const SOFA_MESSAGE = 'I want to buy the Solaris Sofa';
     const RESERVATION_IDS = ALLOWED_FIXED_DEPOSITS.map(a => 'fixed_' + a);
 
     function reservationBasis() {
@@ -2828,10 +3073,13 @@ describe('product reservation deposits', () => {
         assert.equal(basis.productLabel, 'Solaris Sofa');
     });
 
-    // Same gate as the wall bed path: asking about a product is not asking to buy it.
-    test('asking about a product without buy intent offers nothing', () => {
+    // Same gate as the wall bed path: asking about a product is not asking to
+    // buy it, and nor is settling on one.
+    test('asking about a product, or merely wanting it, offers nothing', () => {
         assert.equal(getDepositBasisFromContext('Do you have the Solaris Sofa?', SOFA_HISTORY), null);
         assert.equal(computeDepositOffer('How much is the Solaris Sofa?', SOFA_HISTORY), null);
+        assert.equal(computeDepositOffer('I want the Solaris Sofa', SOFA_HISTORY), null,
+            'interest in a sofa must no more produce a button than interest in a wall bed');
     });
 
     // ── Only ALLOWED_FIXED_DEPOSITS may be charged ──
@@ -2933,7 +3181,7 @@ describe('product reservation deposits', () => {
 
     // ── The wall bed flows must not regress ──
     test('wall bed deposits still offer 10% plus the fixed amounts', () => {
-        const offer = computeDepositOffer('10ft', [
+        const offer = computeDepositOffer('10ft, I want to buy it', [
             { role: 'user', content: 'I want a Murano Queen Sofa with side cabinets around it, how much in total?' },
             { role: 'assistant', content: 'Sure! What is the total height of the wall, in feet?' },
             { role: 'user', content: '11ft' },
@@ -2948,8 +3196,8 @@ describe('product reservation deposits', () => {
         assert.equal(offer.productLabel, 'Murano Queen Sofa', 'the model is mirrored for the Product column');
     });
 
-    test('a priced wall bed with buy intent is still wallbed_only, not a reservation', () => {
-        const basis = getDepositBasisFromContext('I want the Murano Single', [
+    test('a priced wall bed with a commitment is still wallbed_only, not a reservation', () => {
+        const basis = getDepositBasisFromContext('I want to buy the Murano Single', [
             { role: 'user', content: 'Is there a Murano Single?' },
             { role: 'assistant', content: 'Yes — the Murano Single is RM 16,083.40 retail | RM 12,062.55 sale.' }
         ]);
