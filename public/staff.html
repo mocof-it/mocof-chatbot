@@ -42,11 +42,11 @@
   h1 { font-size: 18px; margin: 0 0 4px; }
   .sub { color: #777777; font-size: 12px; margin: 0 0 20px; }
   label { display: block; font-size: 12px; font-weight: 600; margin: 12px 0 4px; }
-  input, textarea {
+  input, textarea, select {
     width: 100%; padding: 10px 12px; font-size: 14px; font-family: inherit;
     border: 1px solid #dddddd; border-radius: 10px; background: #ffffff; color: #222222;
   }
-  input:focus, textarea:focus { outline: 2px solid #000000; outline-offset: -1px; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid #000000; outline-offset: -1px; }
   textarea { resize: vertical; min-height: 68px; }
   button {
     background: #000000; color: #ffffff; border: none; border-radius: 20px;
@@ -60,9 +60,6 @@
   .ok { color: #0a7d3f; font-size: 13px; margin-top: 10px; }
   .muted { color: #777777; font-size: 12px; }
   .row { display: flex; gap: 8px; align-items: flex-start; }
-  .check { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; }
-  .check input[type="checkbox"] { width: 16px; flex: none; margin-top: 2px; padding: 0; }
-  .check label { margin: 0; font-weight: 600; }
   .row input.desc { flex: 1; }
   .row input.amt { width: 130px; }
   .lineitem input.desc { flex: 1; min-width: 0; }
@@ -162,16 +159,17 @@
         <div id="items"></div>
         <button type="button" class="ghost" id="addItem">+ Add product</button>
 
-        <!-- Reference figures printed on the PDF only. The invoice total and
-             the Stripe charge are the full price either way — the customer's
-             own bank is what splits their card charge into installments. -->
-        <div class="check">
-          <input type="checkbox" id="installments">
-          <div>
-            <label for="installments">Include installment options (bank credit card plans)</label>
-            <div class="muted">Prints a monthly-payment table on the PDF. Does not change what is charged.</div>
-          </div>
-        </div>
+        <!-- This is a MOCOF installment, not a bank's: picking a term ADDS
+             INTEREST to the invoice, and Stripe collects the larger figure.
+             The server derives the interest from the term, so the only thing
+             sent from here is which term was chosen. -->
+        <label for="installmentMonths">Installment plan <span class="muted">— optional, adds interest to the invoice</span></label>
+        <select id="installmentMonths">
+          <option value="">None — pay in full</option>
+          <option value="6">6 months (+3% interest)</option>
+          <option value="12">12 months (+5% interest)</option>
+        </select>
+        <div class="muted" style="margin-top:6px;">Longer terms are subject to approval and are arranged outside this tool.</div>
 
         <div class="summary hidden" id="summary"></div>
         <div class="total" id="total"></div>
@@ -233,16 +231,22 @@ var MOCOF_BANK = {
   ]
 };
 
-/* Printed with the installment table. The banks are listed rather than chosen
-   from, because the rates are identical at every one of them — the customer
-   simply uses whichever card they hold. The note is the important half: it is
-   what makes clear that MOCOF is not financing anything. */
-var MOCOF_INSTALLMENT = {
-  heading: 'Installment options — via participating bank credit cards',
-  banks: 'Maybank, Standard Chartered, OCBC, UOB, BSN, HSBC, Alliance, Ambank, Affin, RHB',
-  note: 'Installment plans are provided and approved by your bank, subject to its terms. '
-      + 'The invoice balance above is payable in full; your bank converts it into monthly installments.'
-};
+/* MOCOF's own installment terms, mirroring INSTALLMENT_TERMS in
+   lib/installment.js.
+
+   Duplicated here for ONE reason: the summary has to preview the interest
+   before any invoice exists, and the browser cannot import a server module.
+   Every figure that reaches a customer still comes back from the server —
+   nothing below is ever sent, and nothing below decides what is charged. A
+   drift test in test/installment.test.js pins these against the server's
+   table, so the two cannot disagree without the suite failing. */
+var MOCOF_INSTALLMENT_TERMS = [
+  { months: 6, rate: 0.03 },
+  { months: 12, rate: 0.05 }
+];
+
+var MOCOF_INSTALLMENT_NOTE = 'Monthly installments are payable to MOCOF SDN BHD on the agreed schedule. '
+    + 'The total above includes the installment interest for the term shown.';
 
 var MOCOF_INVOICE_NOTES = [
   'Goods sold, interior design fees and deposit made are neither returnable or refundable.',
@@ -336,7 +340,7 @@ function startNewInvoice() {
   ['custName', 'custEmail', 'contact', 'icPassport', 'tin', 'salesPerson', 'location',
    'addrLine1', 'addrLine2', 'addrCity', 'addrPostcode', 'addrState']
     .forEach(function (id) { el(id).value = ''; });
-  el('installments').checked = false;
+  el('installmentMonths').value = '';
   items = [blankRow()];
   renderItems();
   show(el('draftCard'), true);
@@ -534,11 +538,58 @@ function renderSummary() {
     shown++;
   });
 
+  /* With a term chosen, the summary has to show the customer's real position:
+     what the goods come to, what the interest adds, what is owed, and what that
+     is per month. Shown only once every amount is in — an interest figure
+     computed from a half-filled invoice would be a wrong number on screen.
+
+     These are a PREVIEW. The server recomputes all of it from the term, and
+     the invoice is created from the server's figures, never from these. */
+  var term = selectedInstallmentTerm();
+  if (shown > 0 && term && !incomplete) {
+    var interest = Math.round(total * term.rate * 100) / 100;
+    var withInterest = Math.round((total + interest) * 100) / 100;
+    var monthly = Math.round((withInterest / term.months) * 100) / 100;
+
+    [['Subtotal', formatRM(total)],
+     ['Installment interest (' + term.months + ' months, ' + formatPercent(term.rate) + ')', formatRM(interest)],
+     ['Total payable', formatRM(withInterest)],
+     [term.months + ' monthly payments of', formatRM(monthly)]
+    ].forEach(function (row) {
+      var line = document.createElement('div');
+      line.className = 'summary-line';
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = row[0];
+      var value = document.createElement('span');
+      value.className = 'value';
+      value.textContent = row[1];
+      line.appendChild(name);
+      line.appendChild(value);
+      box.appendChild(line);
+    });
+    total = withInterest;
+  }
+
   show(box, shown > 0);
   el('total').textContent = shown === 0
     ? ''
     : 'Total: ' + formatRM(total) + (incomplete ? '  (some amounts still missing)' : '');
 }
+
+/* The chosen term, or null. Read from the select rather than tracked in a
+   variable so there is only one place it can be wrong. */
+function selectedInstallmentTerm() {
+  var raw = el('installmentMonths').value;
+  if (raw === '') return null;
+  var months = parseInt(raw, 10);
+  for (var i = 0; i < MOCOF_INSTALLMENT_TERMS.length; i++) {
+    if (MOCOF_INSTALLMENT_TERMS[i].months === months) return MOCOF_INSTALLMENT_TERMS[i];
+  }
+  return null;   // an option the markup does not offer — treat as pay-in-full
+}
+
+el('installmentMonths').addEventListener('change', renderSummary);
 
 el('addItem').addEventListener('click', function () {
   items.push(blankRow());
@@ -574,7 +625,12 @@ el('invoiceForm').addEventListener('submit', async function (e) {
       customerEmail: el('custEmail').value,
       currency: 'myr',
       lineItems: lineItems,
-      installments: el('installments').checked
+      // The TERM, never an amount. The server derives the interest from it and
+      // from its own line-item total; an interest figure sent from here would
+      // be ignored, and sending one would imply otherwise.
+      installmentMonths: el('installmentMonths').value === ''
+        ? null
+        : parseInt(el('installmentMonths').value, 10)
     };
 
     /* The optional, customer-facing fields. Sent only when filled: an empty
@@ -615,9 +671,11 @@ el('invoiceForm').addEventListener('submit', async function (e) {
       location: payload.location || '',
       icPassport: payload.icPassport || '',
       tin: payload.tin || '',
-      // Straight from the server, never recomputed here: the browser holds no
-      // rate table, exactly as it holds no price list.
-      installmentOptions: Array.isArray(r.data.installmentOptions) ? r.data.installmentOptions : [],
+      // The server's plan, not the preview above: these are the figures that
+      // were actually invoiced, so the document and Stripe cannot disagree.
+      installmentPlan: (r.data.installmentPlan && typeof r.data.installmentPlan === 'object')
+        ? r.data.installmentPlan
+        : null,
       invoiceNumber: r.data.invoiceNumber || r.data.invoiceId || '',
       hostedInvoiceUrl: r.data.hostedInvoiceUrl || '',
       // Stripe's own total, not a number re-derived in the browser, so the PDF
@@ -737,9 +795,15 @@ function buildInvoiceDocDefinition(inv) {
       { text: formatMoney(lineTotal), alignment: 'right' }
     ]);
   });
-  // Stripe's figure wins; the local sum is only a fallback if the response
-  // somehow carried no total.
-  var balanceDue = inv.total === null ? computed : inv.total;
+  /* Stripe's figure wins, and on an installment invoice that figure already
+     INCLUDES the interest — Stripe was sent the interest as its own line item,
+     so nothing has to be added to it here. The local sum is only a fallback
+     for a response that carried no total, and it does have to add the interest
+     back, because inv.lineItems holds the products alone. */
+  var plan = (inv.installmentPlan && typeof inv.installmentPlan === 'object') ? inv.installmentPlan : null;
+  var balanceDue = inv.total === null
+    ? Math.round((computed + (plan ? plan.interestRm : 0)) * 100) / 100
+    : inv.total;
 
   // Both ways to pay, side by side, so the customer picks one without asking.
   var cardColumn = [{ text: 'Pay by card online', style: 'payHeading' }];
@@ -752,47 +816,52 @@ function buildInvoiceDocDefinition(inv) {
     cardColumn.push({ text: 'Link unavailable — contact MOCOF.', style: 'payBody' });
   }
 
-  /* Reference only, and deliberately built from what the SERVER sent: no rate
-     lives in this file, so a figure printed here cannot drift from the one the
-     endpoint computed. An invoice created without the option simply has no
-     section — an empty table with a heading would read as an error. */
+  /* MOCOF's own installment plan, built entirely from what the SERVER sent: no
+     rate lives in this part of the file, so a figure printed on a customer's
+     invoice cannot drift from the one that was actually charged.
+
+     It sits beside the balance due rather than at the foot of the page,
+     because it is what EXPLAINS that figure — the items table comes to the
+     subtotal, and the gap between the two is the interest. A pay-in-full
+     invoice has no section at all. */
   var installmentBlocks = [];
-  var options = Array.isArray(inv.installmentOptions) ? inv.installmentOptions : [];
-  if (options.length > 0) {
-    var planRows = [[
-      { text: 'TERM', style: 'th' },
-      { text: 'INTEREST', style: 'th', alignment: 'right' },
-      { text: 'MONTHLY', style: 'th', alignment: 'right' }
-    ]];
-    options.forEach(function (plan) {
-      planRows.push([
-        { text: plan.months + ' months' },
-        // Stored as a decimal fraction; the percentage is a display concern,
-        // and toFixed would print "2.50%" where the bank's own table says 2.5%.
-        { text: formatPercent(plan.rate), alignment: 'right' },
-        { text: 'RM ' + formatMoney(plan.monthlyRm), alignment: 'right' }
-      ]);
-    });
+  if (plan) {
+    var planRows = [
+      ['Subtotal', 'MYR ' + formatMoney(plan.totalRm - plan.interestRm)],
+      ['Installment interest (' + plan.months + ' months, ' + formatPercent(plan.rate) + ')',
+       'MYR ' + formatMoney(plan.interestRm)],
+      ['Total payable', 'MYR ' + formatMoney(plan.totalRm)]
+    ];
     installmentBlocks = [
       {
-        margin: [0, 24, 0, 0],
-        stack: [
-          { text: MOCOF_INSTALLMENT.heading, style: 'payHeading', margin: [0, 0, 0, 6] },
+        margin: [0, 18, 0, 0],
+        columns: [
+          { width: '*', text: '' },
           {
-            table: { headerRows: 1, widths: ['*', 80, 90], body: planRows },
-            layout: {
-              fillColor: function (rowIndex) { return rowIndex === 0 ? '#222222' : null; },
-              hLineWidth: function (i, node) { return (i === 0 || i === node.table.body.length) ? 0 : 0.5; },
-              vLineWidth: function () { return 0; },
-              hLineColor: function () { return '#dddddd'; },
-              paddingTop: function () { return 4; },
-              paddingBottom: function () { return 4; }
-            }
-          },
-          { text: 'Participating banks: ' + MOCOF_INSTALLMENT.banks, style: 'note', margin: [0, 6, 0, 0] },
-          { text: MOCOF_INSTALLMENT.note, style: 'note', margin: [0, 4, 0, 0] }
-        ]
-      }
+            width: 'auto',
+            stack: [
+              { text: 'INSTALLMENT: ' + plan.months + ' MONTHS', style: 'sectionLabel', alignment: 'right' },
+              {
+                table: {
+                  body: planRows.map(function (row) {
+                    return [
+                      { text: row[0], style: 'metaLabel' },
+                      { text: row[1], alignment: 'right' }
+                    ];
+                  }).concat([[
+                    { text: plan.months + ' monthly payments of', style: 'balanceLabel', margin: [0, 4, 12, 0] },
+                    { text: 'MYR ' + formatMoney(plan.monthlyRm) + ' /month',
+                      style: 'balanceValue', alignment: 'right', margin: [0, 4, 0, 0] }
+                  ]])
+                },
+                layout: 'noBorders'
+              }
+            ]
+          }
+        ],
+        columnGap: 24
+      },
+      { margin: [0, 8, 0, 0], text: MOCOF_INSTALLMENT_NOTE, style: 'note' }
     ];
   }
 
@@ -880,7 +949,8 @@ function buildInvoiceDocDefinition(inv) {
             layout: 'noBorders'
           }
         ]
-      },
+      }
+    ].concat(installmentBlocks, [
       {
         margin: [0, 26, 0, 0],
         columns: [
@@ -893,7 +963,6 @@ function buildInvoiceDocDefinition(inv) {
         ],
         columnGap: 24
       },
-    ].concat(installmentBlocks, [
       {
         margin: [0, 26, 0, 0],
         stack: MOCOF_INVOICE_NOTES.map(function (line) {

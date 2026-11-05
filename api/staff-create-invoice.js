@@ -4,7 +4,7 @@
 // confirmed. Endpoint: POST /api/staff-create-invoice
 // Body: { customerName, customerEmail, currency,
 //         address?, contact?, salesPerson?, location?,
-//         icPassport?, tin?, installments?,
+//         icPassport?, tin?, installmentMonths?,
 //         lineItems: [{ description, quantity, unitAmount }] }
 // Env vars: STRIPE_SECRET_KEY, STAFF_*
 //
@@ -12,6 +12,12 @@
 // READS on the invoice (Bill to, and the Contact / Sales Person / Location
 // custom fields), never what they are charged. Nothing here is tax, SST or
 // e-invoice handling; that lives in QuickBooks and deliberately not here.
+//
+// `installmentMonths` is the ONE exception, and it is on the money path:
+// choosing a MOCOF installment term adds interest to the invoice, so Stripe
+// collects more than the line items come to. The amount of that interest is
+// derived by validateInvoiceInput() from the term plus its own line-item total
+// — a request that sends an interest figure or a total is not read.
 //
 // This is the only file in the staff tool that creates anything. It takes
 // structured fields, never free text and never the model's raw output — by the
@@ -25,9 +31,14 @@
 import Stripe from 'stripe';
 import { requireStaffAuth } from '../lib/staffAuth.js';
 import { validateInvoiceInput } from '../lib/invoiceInput.js';
-import { computeInstallmentOptions } from '../lib/installment.js';
 
 const DAYS_UNTIL_DUE = 3;
+
+// 0.05 -> "5%", 0.03 -> "3%". Trailing zeros are dropped so the line item reads
+// the way the term is quoted to the customer, not as "5.00%".
+function formatRatePercent(rate) {
+    return `${Math.round(rate * 1000) / 10}%`;
+}
 
 function getStripeClient() {
     const key = process.env.STRIPE_SECRET_KEY;
@@ -58,7 +69,10 @@ export default async function handler(req, res) {
     }
     const {
         customerName, customerEmail, currency, lineItems,
-        address, contact, salesPerson, location, icPassport, tin
+        address, contact, salesPerson, location, icPassport, tin,
+        // null unless the staff member chose a term. Already validated and
+        // already priced: every figure on it was computed server-side.
+        installmentPlan = null
     } = validation.value;
 
     // Buyer identifiers go on the CUSTOMER as metadata, not on the invoice as
@@ -68,12 +82,6 @@ export default async function handler(req, res) {
     // suits an identifier the customer already knows and nobody else needs to
     // read. Keys are added only when filled — writing an empty string would
     // erase a value an earlier invoice captured for this customer.
-    // Reference figures only, and read straight off the raw body rather than
-    // through validateInvoiceInput(): this is a display toggle, not a number,
-    // so it has no business in the function that gates the charge. Strictly
-    // `=== true`, so a stray string cannot switch it on.
-    const wantsInstallments = req.body.installments === true;
-
     const buyerMetadata = {};
     if (icPassport) buyerMetadata.ic_passport = icPassport;
     if (tin) buyerMetadata.tin = tin;
@@ -166,20 +174,43 @@ export default async function handler(req, res) {
             });
         }
 
+        // 2b. The interest, as its own line item rather than folded into the
+        //     products. The customer's invoice has to show WHAT they are paying
+        //     and WHY it is more than the goods came to; burying interest in a
+        //     product price would be both unreadable and, for a tool that
+        //     invoices on MOCOF's behalf, indefensible.
+        //
+        //     Attached after the products so it prints last, and priced from
+        //     the server's own plan — the same object the response reports and
+        //     the PDF prints, so the Stripe total, the document and the figure
+        //     quoted to the customer cannot diverge.
+        if (installmentPlan) {
+            await stripe.invoiceItems.create({
+                customer: customer.id,
+                invoice: invoice.id,
+                quantity: 1,
+                unit_amount_decimal: String(Math.round(installmentPlan.interestRm * 100)),
+                currency,
+                description: `Installment interest (${installmentPlan.months} months, `
+                    + `${formatRatePercent(installmentPlan.rate)})`
+            });
+        }
+
         // 3. Finalizing is what produces hosted_invoice_url — a draft has none.
         const finalized = await stripe.invoices.finalizeInvoice(invoice.id);
 
         const invoiceTotalRm = typeof finalized.total === 'number' ? finalized.total / 100 : null;
-        const installmentOptions = wantsInstallments && invoiceTotalRm !== null
-            ? computeInstallmentOptions(invoiceTotalRm)
-            : [];
 
         // Whether a buyer identifier was captured, never which one or what it
         // said: an IC/passport number and a TIN are personal data, and a log
         // line is the easiest place for them to end up somewhere nothing is
         // protecting them. The yes/no still answers "did that invoice get one".
         console.log(`[staff] invoice ${finalized.id} finalized for ${customerEmail} `
-            + `(${lineItems.length} line item(s), buyer id captured: ${hasBuyerMetadata ? 'yes' : 'no'})`);
+            + `(${lineItems.length} line item(s), buyer id captured: ${hasBuyerMetadata ? 'yes' : 'no'}`
+            // The term is worth having in the log: it is the one staff choice
+            // that changes what was charged, so "why is this invoice more than
+            // the quote?" is answerable without opening Stripe.
+            + `${installmentPlan ? `, installment: ${installmentPlan.months} months` : ''})`);
 
         return res.status(200).json({
             invoiceId: finalized.id,
@@ -192,12 +223,11 @@ export default async function handler(req, res) {
             hostedInvoiceUrl: finalized.hosted_invoice_url,
             invoicePdf: finalized.invoice_pdf,
             total: invoiceTotalRm,
-            // Printed on the branded PDF beside the balance due, never charged.
-            // Computed from the FINALIZED Stripe total — the same number the
-            // PDF prints as BALANCE DUE — so the two cannot disagree on the
-            // page they share. Omitted entirely when the staff member did not
-            // ask for it, or when Stripe returned no usable total.
-            ...(installmentOptions.length > 0 ? { installmentOptions } : {}),
+            // The plan the server derived, passed back so the branded PDF
+            // prints the same term, interest and monthly figure that were
+            // actually invoiced. Absent on a pay-in-full invoice, so the PDF
+            // tests for it rather than inferring one from two totals.
+            ...(installmentPlan ? { installmentPlan } : {}),
             currency
         });
     } catch (err) {
